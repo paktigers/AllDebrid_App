@@ -1,0 +1,45 @@
+plugins {
+    id 'com.android.application'
+}
+
+android {
+    namespace 'com.alldebrid.mobile'
+    compileSdk 35
+
+    defaultConfig {
+        applicationId "com.alldebrid.mobile"
+        minSdk 26
+        targetSdk 34
+        versionCode 5
+        versionName "2.3"
+
+        ndk {
+            abiFilters 'arm64-v8a', 'armeabi-v7a'
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+}
+
+dependencies {
+    // Built-in video player (ExoPlayer / Media3)
+    implementation 'androidx.media3:media3-exoplayer:1.7.1'
+    implementation 'androidx.media3:media3-exoplayer-hls:1.7.1'
+    implementation 'androidx.media3:media3-ui:1.7.1'
+    // FFmpeg software decoders for audio AND video (DTS, AC3, E-AC3, TrueHD, FLAC, Opus, H.264, HEVC, VP8, VP9)
+    implementation 'io.github.anilbeesetti:nextlib-media3ext:1.7.1-0.9.0'
+    // Chromecast (cast to TV) + AppCompat (needed by the cast device chooser)
+    implementation 'androidx.media3:media3-cast:1.7.1'
+    implementation 'androidx.mediarouter:mediarouter:1.7.0'
+    implementation 'com.google.android.gms:play-services-cast-framework:21.5.0'
+    implementation 'androidx.appcompat:appcompat:1.7.0'
+}
