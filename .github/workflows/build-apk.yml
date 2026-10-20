@@ -5,6 +5,9 @@ on:
     branches: [ main, master ]
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -20,10 +23,50 @@ jobs:
         with:
           gradle-version: '8.9'
 
-      - name: Build debug APK
-        run: gradle assembleDebug --no-daemon
+      - name: Prepare signing key
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+        run: |
+          if [ -n "$KEYSTORE_BASE64" ]; then
+            echo "$KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/release.keystore"
+            echo "KEYSTORE_FILE=$RUNNER_TEMP/release.keystore" >> "$GITHUB_ENV"
+            echo "SIGNED=true" >> "$GITHUB_ENV"
+          else
+            echo "SIGNED=false" >> "$GITHUB_ENV"
+            echo "::warning::No signing key (secrets KEYSTORE_BASE64 / KEYSTORE_PASSWORD) found. Building a debug APK: it will NOT install over a previous version and no release is published."
+          fi
+
+      - name: Build APK
+        env:
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+        run: |
+          if [ "$SIGNED" = "true" ]; then
+            gradle assembleRelease --no-daemon
+          else
+            gradle assembleDebug --no-daemon
+          fi
+
+      - name: Collect APK
+        run: |
+          mkdir -p out
+          if [ "$SIGNED" = "true" ]; then
+            cp app/build/outputs/apk/release/app-release.apk out/AllDebrid.apk
+          else
+            cp app/build/outputs/apk/debug/app-debug.apk out/AllDebrid.apk
+          fi
 
       - uses: actions/upload-artifact@v4
         with:
           name: AllDebrid-APK
-          path: app/build/outputs/apk/debug/app-debug.apk
+          path: out/AllDebrid.apk
+
+      - name: Publish GitHub Release (the app checks this for updates)
+        if: env.SIGNED == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VC=$((100 + GITHUB_RUN_NUMBER))
+          gh release create "build-$VC" out/AllDebrid.apk \
+            --title "AllDebrid build $VC" \
+            --notes "Automatic build $VC (commit ${GITHUB_SHA::7})" \
+            --latest || gh release upload "build-$VC" out/AllDebrid.apk --clobber
