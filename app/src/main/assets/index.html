@@ -1056,23 +1056,49 @@ function showSettings() {
       <div class="card"><h4>Simultaneous downloads</h4><div class="row">${[1, 2, 3, 4, 5].map(n => `<button class="chip ${cfg.parallel === n ? 'on' : ''}" data-p="${n}">${n}</button>`).join('')}</div><div class="mut">The Android Download Manager handles the rest (resume, notifications).</div></div>
       <div class="card"><label class="sw" style="margin:0"><input type="checkbox" id="stF" ${cfg.folderPerTorrent ? 'checked' : ''}> Separate folder for each torrent (with subfolders)</label></div>
       <div class="card"><label class="sw" style="margin:0"><input type="checkbox" id="stD" ${cfg.autoDeleteMagnet ? 'checked' : ''}> Delete the torrent from the server after download</label></div>
+      <div class="card"><h4>App updates</h4><div class="mut">${appInfo ? 'Version ' + esc(appInfo.versionName) + ' (build ' + appInfo.versionCode + ')' : 'Version unknown'}</div><div class="row" style="margin-top:10px"><button class="btn" id="stUpd">Check for updates</button></div><label class="sw" style="margin:0"><input type="checkbox" id="stAuto" ${cfg.autoUpdate !== false ? 'checked' : ''}> Check automatically</label></div>
       <div class="card"><div class="mut">Files are saved to:<br><b style="color:var(--tx)">Downloads/AllDebrid/</b></div></div>`;
   };
   draw();
-  ov.onclick = e => { const t = e.target; if (t.dataset.th) { cfg.theme = t.dataset.th; store.set('ad_cfg', cfg); applyTheme(); draw(); } else if (t.dataset.p) { cfg.parallel = +t.dataset.p; store.set('ad_cfg', cfg); draw(); } };
-  ov.onchange = e => { if (e.target.id === 'stF') cfg.folderPerTorrent = e.target.checked; if (e.target.id === 'stD') cfg.autoDeleteMagnet = e.target.checked; store.set('ad_cfg', cfg); };
+  ov.onclick = e => { const t = e.target; if (t.id === 'stUpd') { checkUpdate(true); } else if (t.dataset.th) { cfg.theme = t.dataset.th; store.set('ad_cfg', cfg); applyTheme(); draw(); } else if (t.dataset.p) { cfg.parallel = +t.dataset.p; store.set('ad_cfg', cfg); draw(); } };
+  ov.onchange = e => { if (e.target.id === 'stAuto') cfg.autoUpdate = e.target.checked; if (e.target.id === 'stF') cfg.folderPerTorrent = e.target.checked; if (e.target.id === 'stD') cfg.autoDeleteMagnet = e.target.checked; store.set('ad_cfg', cfg); };
 }
 
 /* ---- Help ---- */
 function showHelp() {
   const log = errLog.slice(-10).reverse().map(esc).join('<br>') || 'No errors recorded.';
-  openOverlay('Help / Guide', `<div class="card" style="text-align:center"><img src="logo.png" alt="AllDebrid" style="width:96px;height:96px"><h4 style="margin:6px 0 0">AllDebrid Mobile</h4><div class="mut">Version 2.0</div></div>
+  openOverlay('Help / Guide', `<div class="card" style="text-align:center"><img src="logo.png" alt="AllDebrid" style="width:96px;height:96px"><h4 style="margin:6px 0 0">AllDebrid Mobile</h4><div class="mut">${appInfo ? 'Version ' + esc(appInfo.versionName) + ' (build ' + appInfo.versionCode + ')' : ''}</div></div>
   <div class="card"><h4>Getting started</h4><div class="mut">1. Go to More → Account and add your API key (alldebrid.com/apikeys), or use PIN login.<br>2. In the Generate tab, paste links or magnets and tap Generate.<br>3. Tap any file or torrent to open its actions: Download, Stream, Copy link, Share and more.</div></div>
   <div class="card"><h4>Streaming</h4><div class="mut">Tap ▶ Stream on a premium link or a torrent file to play it in the built-in player.<br>• Double-tap the right / left side of the screen: +10 / -10 seconds.<br>• Swipe up or down on the right side: volume. On the left side: brightness.<br>• Top bar: Chromecast, CC (subtitles, or load your own file), Audio track, Quality, and ⋮ Options (media info, speed, decoder, open in another player). Bottom bar: mute, seek bar and Aspect ratio.<br>• The player remembers where you stopped and asks if you want to resume or start over.<br>• Audio (DTS, AC3/E-AC3, TrueHD, FLAC...) and video (H.264, HEVC, VP8, VP9) can be decoded in software, so almost every file plays; on a decoding error the player switches automatically.<br>• Chromecast works best with MP4 (H.264/AAC), WebM and HLS files.</div></div>
   <div class="card"><h4>Tips</h4><div class="mut">• You can "Share" a link from any app to this app.<br>• Tapping a magnet link in a browser can also open this app.<br>• Check tests whether links are dead or alive without using quota.<br>• Use ☑ Select multiple for bulk actions.<br>• Downloads use Android's Download Manager: you get notifications and it resumes automatically if the connection drops.</div></div>
   <div class="card"><h4>Please note</h4><div class="mut">Direct links expire after a while; the app creates a fresh one when you download or play from History. Never share your API key with anyone.</div></div>
   <div class="card"><h4>Error log</h4><div class="mut" style="word-break:break-all">${log}</div></div>`);
 }
+
+/* ================= app updates (GitHub Releases) ================= */
+const appInfo = (() => { try { return window.Android && Android.appInfo ? JSON.parse(Android.appInfo()) : null; } catch (e) { return null; } })();
+async function checkUpdate(manual) {
+  if (!appInfo || !appInfo.repo) { if (manual) toast('Updates work only for APKs built on GitHub', true); return; }
+  try {
+    const r = await http('GET', `https://api.github.com/repos/${appInfo.repo}/releases/latest`, { Accept: 'application/vnd.github+json' }, '');
+    if (r.status === 404) throw new Error('No release found yet. The repository must be public and a signed build must have finished.');
+    if (r.status !== 200) throw new Error('GitHub returned HTTP ' + r.status);
+    const j = JSON.parse(r.body);
+    const code = parseInt(String(j.tag_name || '').replace(/\D/g, ''), 10) || 0;
+    const asset = (j.assets || []).find(a => /\.apk$/i.test(a.name));
+    store.set('ad_lastcheck', Date.now());
+    if (code > appInfo.versionCode && asset) { if (manual || store.get('ad_skipver', 0) !== code) offerUpdate(j, code, asset); }
+    else if (manual) toast(code > appInfo.versionCode ? 'An update exists but no APK is attached' : 'You have the latest version ✔');
+  } catch (e) { if (manual) toast(errText(e), true); }
+}
+function offerUpdate(rel, code, asset) {
+  const notes = String(rel.body || '').slice(0, 400);
+  const b = openSheet(`<h3>Update available</h3><div class="mut" style="margin-bottom:12px">New build ${code} (you have ${appInfo.versionCode}). ${asset.size ? fmtSize(asset.size) : ''}${notes ? '<br><br>' + esc(notes) : ''}</div><div class="row"><button class="btn" id="upSkip">Skip this version</button><button class="btn" id="upLater">Later</button></div><div class="row"><button class="btn primary" id="upGo">⬇ Download &amp; install</button></div>`);
+  $('#upLater', b).onclick = cancelSheet;
+  $('#upSkip', b).onclick = () => { store.set('ad_skipver', code); cancelSheet(); };
+  $('#upGo', b).onclick = () => { closeSheet(); if (window.Android && Android.installUpdate) Android.installUpdate(asset.browser_download_url); else window.open(asset.browser_download_url, '_blank'); };
+}
+if (appInfo && cfg.autoUpdate !== false && Date.now() - store.get('ad_lastcheck', 0) > 6 * 3600 * 1000) setTimeout(() => checkUpdate(false), 4000);
 
 /* ================= init ================= */
 applyTheme(); updateBadge(); updateCounts(); renderDL(); pump();

@@ -4,9 +4,11 @@ import android.Manifest;
 import android.app.Activity;
 import android.app.DownloadManager;
 import android.content.ClipData;
+import android.content.BroadcastReceiver;
 import android.content.ClipboardManager;
 import android.content.Context;
 import android.content.Intent;
+import android.content.IntentFilter;
 import android.content.pm.PackageManager;
 import android.content.res.Configuration;
 import android.database.Cursor;
@@ -15,6 +17,8 @@ import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Environment;
+import android.provider.Settings;
+import android.widget.Toast;
 import android.util.Base64;
 import android.view.View;
 import android.view.Window;
@@ -26,10 +30,13 @@ import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
 
+import androidx.core.content.FileProvider;
+
 import org.json.JSONArray;
 import org.json.JSONObject;
 
 import java.io.ByteArrayOutputStream;
+import java.io.File;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.HttpURLConnection;
@@ -48,6 +55,9 @@ public class MainActivity extends Activity {
     private ValueCallback<Uri[]> fileCb;
     private String pendingIncoming = null;
     private boolean pageReady = false;
+    private long updateDownloadId = -1;
+    private boolean pendingInstall = false;
+    private BroadcastReceiver updateReceiver;
     private final ExecutorService pool = Executors.newFixedThreadPool(6);
 
     @Override
@@ -112,6 +122,17 @@ public class MainActivity extends Activity {
         }
 
         handleIntent(getIntent());
+        updateReceiver = new BroadcastReceiver() {
+            @Override
+            public void onReceive(Context c, Intent i) {
+                long id = i.getLongExtra(DownloadManager.EXTRA_DOWNLOAD_ID, -1);
+                if (id != -1 && id == updateDownloadId) installUpdateApk();
+            }
+        };
+        IntentFilter doneFilter = new IntentFilter(DownloadManager.ACTION_DOWNLOAD_COMPLETE);
+        if (Build.VERSION.SDK_INT >= 33) registerReceiver(updateReceiver, doneFilter, Context.RECEIVER_EXPORTED);
+        else registerReceiver(updateReceiver, doneFilter);
+
         web.loadUrl("file:///android_asset/index.html");
     }
 
@@ -178,7 +199,60 @@ public class MainActivity extends Activity {
     @Override
     protected void onDestroy() {
         pool.shutdownNow();
+        try { if (updateReceiver != null) unregisterReceiver(updateReceiver); } catch (Exception ignored) { }
         super.onDestroy();
+    }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        if (pendingInstall && getPackageManager().canRequestPackageInstalls()) installUpdateApk();
+    }
+
+    // ---------- In-app update: download the new APK from GitHub and install it ----------
+    private File updateFile() {
+        return new File(getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS), "AllDebrid-update.apk");
+    }
+
+    private void startUpdateDownload(String url) {
+        try {
+            File f = updateFile();
+            if (f.exists()) f.delete();
+            DownloadManager dm = (DownloadManager) getSystemService(Context.DOWNLOAD_SERVICE);
+            DownloadManager.Request r = new DownloadManager.Request(Uri.parse(url));
+            r.setTitle("AllDebrid update");
+            r.setMimeType("application/vnd.android.package-archive");
+            r.setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED);
+            r.setDestinationInExternalFilesDir(this, Environment.DIRECTORY_DOWNLOADS, "AllDebrid-update.apk");
+            updateDownloadId = dm.enqueue(r);
+            Toast.makeText(this, "Downloading the update... the installer opens when it is ready", Toast.LENGTH_LONG).show();
+        } catch (Exception e) {
+            Toast.makeText(this, "Could not start the update download", Toast.LENGTH_LONG).show();
+        }
+    }
+
+    private void installUpdateApk() {
+        File f = updateFile();
+        if (!f.exists()) return;
+        if (!getPackageManager().canRequestPackageInstalls()) {
+            pendingInstall = true;
+            Toast.makeText(this, "Allow \"Install unknown apps\" for AllDebrid, then come back", Toast.LENGTH_LONG).show();
+            try {
+                startActivity(new Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
+                        Uri.parse("package:" + getPackageName())));
+            } catch (Exception ignored) { }
+            return;
+        }
+        pendingInstall = false;
+        try {
+            Uri uri = FileProvider.getUriForFile(this, getPackageName() + ".fileprovider", f);
+            Intent i = new Intent(Intent.ACTION_VIEW);
+            i.setDataAndType(uri, "application/vnd.android.package-archive");
+            i.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_ACTIVITY_NEW_TASK);
+            startActivity(i);
+        } catch (Exception e) {
+            Toast.makeText(this, "Could not open the installer", Toast.LENGTH_LONG).show();
+        }
     }
 
     // ---------- Theme (status / navigation bar colours) ----------
@@ -403,6 +477,24 @@ public class MainActivity extends Activity {
                     startActivity(i);
                 } catch (Exception ignored) { }
             });
+        }
+
+        @JavascriptInterface
+        public String appInfo() {
+            try {
+                JSONObject o = new JSONObject();
+                o.put("versionCode", BuildConfig.VERSION_CODE);
+                o.put("versionName", BuildConfig.VERSION_NAME);
+                o.put("repo", BuildConfig.UPDATE_REPO);
+                return o.toString();
+            } catch (Exception e) {
+                return "{}";
+            }
+        }
+
+        @JavascriptInterface
+        public void installUpdate(final String url) {
+            runOnUiThread(() -> startUpdateDownload(url));
         }
 
         @JavascriptInterface

@@ -1,4 +1,6 @@
-# AllDebrid Android App (v2): How to build the APK
+# AllDebrid Android App: How to build the APK
+
+**Updating the app without uninstalling or recreating the repository: read `UPDATING.md` first.**
 
 An Android app (WebView interface + native bridge + built-in ExoPlayer video player) that brings the
 AllDebrid PowerShell tool to your phone. You build the APK yourself in about 10 minutes.

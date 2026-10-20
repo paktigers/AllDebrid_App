@@ -10,18 +10,48 @@ android {
         applicationId "com.alldebrid.mobile"
         minSdk 26
         targetSdk 34
-        versionCode 5
-        versionName "2.3"
+
+        // Every GitHub build gets a higher number, so each build can be installed over the previous one.
+        def runNumber = (System.getenv("GITHUB_RUN_NUMBER") ?: "0").toInteger()
+        versionCode 100 + runNumber
+        versionName "2.4." + runNumber
+
+        // The app checks this repository for new releases ("owner/name"); filled in automatically on GitHub.
+        buildConfigField "String", "UPDATE_REPO", "\"" + (System.getenv("GITHUB_REPOSITORY") ?: "") + "\""
 
         ndk {
             abiFilters 'arm64-v8a', 'armeabi-v7a'
         }
     }
 
+    buildFeatures {
+        buildConfig true
+    }
+
+    signingConfigs {
+        release {
+            def ksPath = System.getenv("KEYSTORE_FILE")
+            if (ksPath != null && new File(ksPath).exists()) {
+                storeFile file(ksPath)
+                storePassword System.getenv("KEYSTORE_PASSWORD")
+                keyAlias "alldebrid"
+                keyPassword System.getenv("KEYSTORE_PASSWORD")
+            }
+        }
+    }
+
     buildTypes {
         release {
             minifyEnabled false
+            if (System.getenv("KEYSTORE_FILE") != null) {
+                signingConfig signingConfigs.release
+            }
         }
+    }
+
+    lint {
+        abortOnError false
+        checkReleaseBuilds false
     }
 
     compileOptions {
