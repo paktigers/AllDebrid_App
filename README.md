@@ -13,11 +13,27 @@ AllDebrid PowerShell tool to your phone. You build the APK yourself in about 10 
 - **Options menu (three dots):** **Media info** (file name, size, duration, container, video / audio / subtitle details,
   decoder mode), playback speed, decoder choice and "open in another player".
 - All player icons are drawn by the app itself, so they look the same on every phone (no emoji).
+- **Pinch to zoom** the picture (up to 5x, drag with two fingers to move it). **Reset zoom** is in the Options menu.
+- **Screen lock:** the lock icon in the bottom bar ignores all touches; tap the screen and press the unlock icon to unlock.
+- **Subtitle style:** size, colour, background and edge. **Subtitle delay:** shift subtitles later or earlier in 0.1 s steps
+  (earlier works for loaded subtitle files; embedded subtitles can only be delayed). Loads .srt, .vtt and .ass files with a
+  choice of file encoding (Arabic / Urdu, Western, Cyrillic).
 - **Resume:** the player remembers how much you watched and asks "Resume from 12:34" or "Start over".
 - **Chromecast:** tap the cast icon in the top bar, pick your TV, and the video plays on the TV (the TV
   downloads the video directly from AllDebrid). Chromecast supports MP4 (H.264/AAC), WebM and HLS best;
   MKV, HEVC or DTS files may not play on the TV. The phone and the TV must be on the same Wi-Fi network.
   Needs Google Play services on the phone.
+
+## App features (v2.5)
+
+- **Clipboard detect:** copy a link or magnet, open the app, and it offers to add or generate it (can be switched off in Settings).
+- **.torrent files:** open a .torrent file from your file manager or browser (or Share it) and the app takes it directly.
+- **Usage & quota** (More menu): premium days left, quota bars for every limited host, and a 14-day graph of the links you generated.
+  AllDebrid does not publish a traffic history, so the graph is built from your own history in the app.
+- **App lock** (Settings): protect the app with your phone's lock (fingerprint, face, PIN or pattern) or an app PIN. It locks when the app
+  opens and after 30 seconds in the background, hides the app in the recent-apps list, and blocks screenshots while it is on.
+- **Torrent filters fixed:** All / Ready / Active / Error respond reliably (answers can no longer overwrite each other and the
+  list is no longer redrawn under your finger).
 
 ## What's new in v2
 

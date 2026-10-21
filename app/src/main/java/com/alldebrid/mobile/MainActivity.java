@@ -3,6 +3,7 @@ package com.alldebrid.mobile;
 import android.Manifest;
 import android.app.Activity;
 import android.app.DownloadManager;
+import android.app.KeyguardManager;
 import android.content.ClipData;
 import android.content.BroadcastReceiver;
 import android.content.ClipboardManager;
@@ -17,11 +18,13 @@ import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Environment;
+import android.provider.OpenableColumns;
 import android.provider.Settings;
 import android.widget.Toast;
 import android.util.Base64;
 import android.view.View;
 import android.view.Window;
+import android.view.WindowManager;
 import android.webkit.JavascriptInterface;
 import android.webkit.ValueCallback;
 import android.webkit.WebChromeClient;
@@ -49,11 +52,14 @@ import java.util.concurrent.Executors;
 public class MainActivity extends Activity {
 
     private static final int REQ_FILE = 1001;
+    private static final int REQ_AUTH = 3001;
     private static final String BG = "#0b1020";
 
     private WebView web;
     private ValueCallback<Uri[]> fileCb;
     private String pendingIncoming = null;
+    private String pendingTorrentName = null;
+    private String pendingTorrentB64 = null;
     private boolean pageReady = false;
     private long updateDownloadId = -1;
     private boolean pendingInstall = false;
@@ -141,15 +147,71 @@ public class MainActivity extends Activity {
         if (i == null) return;
         String text = null;
         String a = i.getAction();
-        if (Intent.ACTION_VIEW.equals(a) && i.getData() != null) text = i.getDataString();
-        else if (Intent.ACTION_SEND.equals(a)) text = i.getStringExtra(Intent.EXTRA_TEXT);
+        Uri data = i.getData();
+        if (Intent.ACTION_VIEW.equals(a) && data != null) {
+            String scheme = data.getScheme();
+            if ("content".equals(scheme) || "file".equals(scheme)) {
+                readTorrentUri(data);          // a .torrent file opened with this app
+                return;
+            }
+            text = i.getDataString();           // magnet: or http(s) link
+        } else if (Intent.ACTION_SEND.equals(a)) {
+            String type = i.getType();
+            Uri stream = null;
+            try {
+                stream = i.getParcelableExtra(Intent.EXTRA_STREAM);
+            } catch (Exception ignored) { }
+            if (stream != null && type != null && type.contains("bittorrent")) {
+                readTorrentUri(stream);
+                return;
+            }
+            text = i.getStringExtra(Intent.EXTRA_TEXT);
+        }
         if (text != null && !text.isEmpty()) {
             pendingIncoming = text;
             deliverIncoming();
         }
     }
 
+    private void readTorrentUri(Uri uri) {
+        try {
+            InputStream is = getContentResolver().openInputStream(uri);
+            if (is == null) return;
+            ByteArrayOutputStream bos = new ByteArrayOutputStream();
+            byte[] buf = new byte[8192];
+            int n;
+            long total = 0;
+            while ((n = is.read(buf)) > 0) {
+                bos.write(buf, 0, n);
+                total += n;
+                if (total > 8000000) break;
+            }
+            is.close();
+            String name = null;
+            try (Cursor c = getContentResolver().query(uri, null, null, null, null)) {
+                if (c != null && c.moveToFirst()) {
+                    int idx = c.getColumnIndex(OpenableColumns.DISPLAY_NAME);
+                    if (idx >= 0) name = c.getString(idx);
+                }
+            } catch (Exception ignored) { }
+            if (name == null) name = uri.getLastPathSegment();
+            if (name == null) name = "file";
+            if (!name.toLowerCase().endsWith(".torrent")) name = name + ".torrent";
+            pendingTorrentName = name;
+            pendingTorrentB64 = Base64.encodeToString(bos.toByteArray(), Base64.NO_WRAP);
+            deliverIncoming();
+        } catch (Exception e) {
+            Toast.makeText(this, "Could not read the torrent file", Toast.LENGTH_LONG).show();
+        }
+    }
+
     private void deliverIncoming() {
+        if (pendingTorrentB64 != null && pageReady && web != null) {
+            final String tn = pendingTorrentName, tb = pendingTorrentB64;
+            pendingTorrentB64 = null;
+            web.post(() -> web.evaluateJavascript("window.__incomingTorrent && window.__incomingTorrent("
+                    + JSONObject.quote(tn) + "," + JSONObject.quote(tb) + ")", null));
+        }
         if (pendingIncoming != null && pageReady && web != null) {
             final String t = pendingIncoming;
             pendingIncoming = null;
@@ -167,6 +229,10 @@ public class MainActivity extends Activity {
 
     @Override
     protected void onActivityResult(int req, int res, Intent data) {
+        if (req == REQ_AUTH) {
+            jsAuth(res == RESULT_OK);
+            return;
+        }
         if (req == REQ_FILE && fileCb != null) {
             Uri[] result = null;
             if (res == RESULT_OK && data != null) {
@@ -201,6 +267,28 @@ public class MainActivity extends Activity {
         pool.shutdownNow();
         try { if (updateReceiver != null) unregisterReceiver(updateReceiver); } catch (Exception ignored) { }
         super.onDestroy();
+    }
+
+    @Override
+    protected void onStop() {
+        super.onStop();
+        if (pageReady && web != null) web.evaluateJavascript("window.__bg && window.__bg()", null);
+    }
+
+    @Override
+    protected void onStart() {
+        super.onStart();
+        if (pageReady && web != null) web.evaluateJavascript("window.__fg && window.__fg()", null);
+    }
+
+    @Override
+    public void onWindowFocusChanged(boolean hasFocus) {
+        super.onWindowFocusChanged(hasFocus);
+        if (hasFocus && pageReady && web != null) web.evaluateJavascript("window.__focus && window.__focus()", null);
+    }
+
+    private void jsAuth(boolean ok) {
+        if (web != null) web.evaluateJavascript("window.__authResult && window.__authResult(" + ok + ")", null);
     }
 
     @Override
@@ -476,6 +564,41 @@ public class MainActivity extends Activity {
                     i.putExtra("key", apiKey);
                     startActivity(i);
                 } catch (Exception ignored) { }
+            });
+        }
+
+        @JavascriptInterface
+        public boolean isDeviceSecure() {
+            try {
+                KeyguardManager km = (KeyguardManager) getSystemService(Context.KEYGUARD_SERVICE);
+                return km != null && km.isDeviceSecure();
+            } catch (Exception e) {
+                return false;
+            }
+        }
+
+        @JavascriptInterface
+        public void authenticate() {
+            runOnUiThread(() -> {
+                try {
+                    KeyguardManager km = (KeyguardManager) getSystemService(Context.KEYGUARD_SERVICE);
+                    Intent i = km == null ? null : km.createConfirmDeviceCredentialIntent("AllDebrid", "Unlock the app");
+                    if (i == null) {
+                        jsAuth(false);
+                        return;
+                    }
+                    startActivityForResult(i, REQ_AUTH);
+                } catch (Exception e) {
+                    jsAuth(false);
+                }
+            });
+        }
+
+        @JavascriptInterface
+        public void setSecure(final boolean on) {
+            runOnUiThread(() -> {
+                if (on) getWindow().addFlags(WindowManager.LayoutParams.FLAG_SECURE);
+                else getWindow().clearFlags(WindowManager.LayoutParams.FLAG_SECURE);
             });
         }
 

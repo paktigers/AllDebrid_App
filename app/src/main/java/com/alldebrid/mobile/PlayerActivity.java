@@ -18,12 +18,15 @@ import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.SystemClock;
 import android.provider.OpenableColumns;
 import android.provider.Settings;
 import android.text.TextUtils;
+import android.util.TypedValue;
 import android.view.GestureDetector;
 import android.view.Gravity;
 import android.view.MotionEvent;
+import android.view.ScaleGestureDetector;
 import android.view.View;
 import android.view.WindowManager;
 import android.widget.FrameLayout;
@@ -45,13 +48,17 @@ import androidx.media3.common.MimeTypes;
 import androidx.media3.common.PlaybackException;
 import androidx.media3.common.Player;
 import androidx.media3.common.TrackSelectionOverride;
+import androidx.media3.common.text.Cue;
+import androidx.media3.common.text.CueGroup;
 import androidx.media3.common.Tracks;
 import androidx.media3.datasource.DefaultHttpDataSource;
 import androidx.media3.exoplayer.DefaultRenderersFactory;
 import androidx.media3.exoplayer.ExoPlayer;
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory;
 import androidx.media3.ui.AspectRatioFrameLayout;
+import androidx.media3.ui.CaptionStyleCompat;
 import androidx.media3.ui.PlayerView;
+import androidx.media3.ui.SubtitleView;
 import androidx.mediarouter.app.MediaRouteButton;
 
 import com.google.android.gms.cast.framework.CastButtonFactory;
@@ -69,12 +76,18 @@ import java.io.OutputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.net.URLEncoder;
+import java.nio.ByteBuffer;
+import java.nio.charset.CharacterCodingException;
+import java.nio.charset.Charset;
+import java.nio.charset.CodingErrorAction;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.Locale;
 import java.util.function.IntConsumer;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
  * Built-in video player.
@@ -118,6 +131,39 @@ public class PlayerActivity extends AppCompatActivity {
     private Ico playBtn, prevBtn, nextBtn, muteBtn;
     private Ico seekLeft, seekRight;
     private Hud volHud, briHud;
+    private TextView subText, zoomHint;
+    private Ico lockBtn, unlockBtn;
+    private boolean screenLocked = false;
+    private float zoom = 1f, panX = 0f, panY = 0f;
+    private ScaleGestureDetector scaleDetector;
+
+    // ---- subtitles (our own renderer: lets us style them and shift their timing)
+    private static class SubCue {
+        final long start, end;
+        final String text;
+
+        SubCue(long s, long e, String t) {
+            start = s;
+            end = e;
+            text = t;
+        }
+    }
+
+    private static final float[] SUB_FRACTION = {0.04f, 0.0533f, 0.07f, 0.09f};
+    private static final float[] SUB_SP = {14f, 18f, 24f, 30f};
+    private static final String[] SUB_SIZE_NAMES = {"Small", "Medium", "Large", "Extra large"};
+    private static final int[] SUB_COLORS = {0xFFFFFFFF, 0xFFFFEB3B, 0xFF22D3EE, 0xFF69F0AE};
+    private static final String[] SUB_COLOR_NAMES = {"White", "Yellow", "Cyan", "Green"};
+    private static final String[] SUB_BG_NAMES = {"None", "Semi-transparent", "Solid black"};
+    private static final String[] SUB_EDGE_NAMES = {"None", "Outline", "Shadow"};
+    private static final String[] SUB_ENC_NAMES = {"Auto", "UTF-8", "Arabic / Urdu (Windows-1256)",
+            "Western (Windows-1252)", "Cyrillic (Windows-1251)"};
+    private List<SubCue> extCues = null;
+    private byte[] extBytes = null;
+    private String extName = "";
+    private long subDelayMs = 0;
+    private String lastShownSub = "";
+    private final Object embeddedToken = new Object();
     private SeekBar seek;
     private ProgressBar spinner;
     private MediaRouteButton routeButton;
@@ -131,6 +177,15 @@ public class PlayerActivity extends AppCompatActivity {
     private final Runnable hideIndicators = () -> {
         volHud.setVisibility(View.GONE);
         briHud.setVisibility(View.GONE);
+    };
+    private final Runnable hideZoomHint = () -> zoomHint.setVisibility(View.GONE);
+    private final Runnable hideUnlock = () -> unlockBtn.setVisibility(View.GONE);
+    private final Runnable subTicker = new Runnable() {
+        @Override
+        public void run() {
+            updateExternalSubtitle();
+            if (extCues != null) ui.postDelayed(this, 120);
+        }
     };
     private final Runnable hideSeekHints = () -> {
         seekLeft.setVisibility(View.GONE);
@@ -183,6 +238,26 @@ public class PlayerActivity extends AppCompatActivity {
         castLabel.setVisibility(View.GONE);
         rootView.addView(castLabel, new FrameLayout.LayoutParams(-2, -2, Gravity.CENTER));
 
+        subText = text("", 18);
+        subText.setVisibility(View.GONE);
+        subText.setGravity(Gravity.CENTER);
+        subText.setPadding(dp(10), dp(4), dp(10), dp(4));
+        subText.setMaxWidth((int) (getResources().getDisplayMetrics().widthPixels * 0.8f));
+        FrameLayout.LayoutParams sl = new FrameLayout.LayoutParams(-2, -2, Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
+        sl.bottomMargin = dp(62);
+        rootView.addView(subText, sl);
+
+        zoomHint = text("", 14);
+        zoomHint.setPadding(dp(12), dp(6), dp(12), dp(6));
+        GradientDrawable zb = new GradientDrawable();
+        zb.setCornerRadius(dp(14));
+        zb.setColor(0x99000000);
+        zoomHint.setBackground(zb);
+        zoomHint.setVisibility(View.GONE);
+        FrameLayout.LayoutParams zl = new FrameLayout.LayoutParams(-2, -2, Gravity.TOP | Gravity.CENTER_HORIZONTAL);
+        zl.topMargin = dp(64);
+        rootView.addView(zoomHint, zl);
+
         View touch = new View(this);
         setupGestures(touch);
         rootView.addView(touch, new FrameLayout.LayoutParams(-1, -1));
@@ -195,16 +270,27 @@ public class PlayerActivity extends AppCompatActivity {
         controls = buildControls();
         rootView.addView(controls, new FrameLayout.LayoutParams(-1, -1));
 
+        unlockBtn = new Ico(this, Ico.UNLOCK);
+        unlockBtn.setDisc(true);
+        unlockBtn.setPadding(dp(12), dp(12), dp(12), dp(12));
+        unlockBtn.setVisibility(View.GONE);
+        unlockBtn.setOnClickListener(v -> setLocked(false));
+        FrameLayout.LayoutParams ul = new FrameLayout.LayoutParams(dp(60), dp(60), Gravity.START | Gravity.CENTER_VERTICAL);
+        ul.leftMargin = dp(40);
+        rootView.addView(unlockBtn, ul);
+
         setContentView(rootView);
         rootView.addOnLayoutChangeListener((v, l, t, r, bt, oL, oT, oR, oB) -> applyAspect());
         hideSystemUi();
+        applySubStyle();
+        applySubMode();
 
         initPlayer(start);
         if (castPlayer != null && castPlayer.isCastSessionAvailable()) switchToCast();
 
-        if (!prefs.getBoolean("gesture_hint", false)) {
-            prefs.edit().putBoolean("gesture_hint", true).apply();
-            toast("Double-tap left/right: \u00B110s \u00B7 Swipe left side: brightness \u00B7 Swipe right side: volume");
+        if (!prefs.getBoolean("gesture_hint2", false)) {
+            prefs.edit().putBoolean("gesture_hint2", true).apply();
+            toast("Double-tap: \u00B110s \u00B7 Swipe left: brightness, right: volume \u00B7 Pinch: zoom \u00B7 Lock icon: lock the screen");
         }
     }
 
@@ -219,6 +305,15 @@ public class PlayerActivity extends AppCompatActivity {
         super.onPause();
         saveProgress();
         if (player != null && player != castPlayer) player.pause();
+    }
+
+    @Override
+    public void onBackPressed() {
+        if (screenLocked) {
+            showUnlockHint();
+            return;
+        }
+        super.onBackPressed();
     }
 
     @Override
@@ -321,6 +416,12 @@ public class PlayerActivity extends AppCompatActivity {
             }
 
             @Override
+            public void onCues(CueGroup cueGroup) {
+                if (owner != player || owner == castPlayer) return;
+                if (extCues == null && subDelayMs > 0) scheduleEmbedded(cueGroup.cues);
+            }
+
+            @Override
             public void onPlayerError(PlaybackException e) {
                 if (owner != player) return;
                 if (owner == exo && !softwareFirst && isDecoderError(e)) {
@@ -373,6 +474,8 @@ public class PlayerActivity extends AppCompatActivity {
         exo.addListener(exoListener);
         player = exo;
         playerView.setPlayer(exo);
+        applySubStyle();
+        applySubMode();
         exo.setMediaItems(list, index, positionMs);
         exo.prepare();
         exo.setPlayWhenReady(play);
@@ -510,7 +613,7 @@ public class PlayerActivity extends AppCompatActivity {
     /** Small icons drawn with Canvas (no emoji or font needed, so they look the same on every phone). */
     private static class Ico extends View {
         static final int BACK = 0, PLAY = 1, PAUSE = 2, PREV = 3, NEXT = 4, VOL = 5, MUTE = 6,
-                SUN = 7, MORE = 8, FWD = 9, REW = 10;
+                SUN = 7, MORE = 8, FWD = 9, REW = 10, LOCK = 11, UNLOCK = 12;
         private int kind;
         private boolean disc = false;
         private final Paint fill = new Paint(Paint.ANTI_ALIAS_FLAG);
@@ -633,6 +736,23 @@ public class PlayerActivity extends AppCompatActivity {
                         float cx = (float) Math.cos(a), cy = (float) Math.sin(a);
                         c.drawLine(12f + 6.7f * cx, 12f + 6.7f * cy, 12f + 9.4f * cx, 12f + 9.4f * cy, stroke);
                     }
+                    break;
+                }
+                case LOCK:
+                case UNLOCK: {
+                    c.drawRoundRect(new RectF(5f, 11f, 19f, 21.5f), 2.2f, 2.2f, fill);
+                    Path sh = new Path();
+                    if (k == LOCK) {
+                        sh.moveTo(8f, 11f);
+                        sh.lineTo(8f, 8f);
+                        sh.arcTo(new RectF(8f, 3f, 16f, 13f), 180f, 180f);
+                        sh.lineTo(16f, 11f);
+                    } else {
+                        sh.moveTo(8f, 11f);
+                        sh.lineTo(8f, 5f);
+                        sh.arcTo(new RectF(8f, 0.5f, 16f, 9.5f), 180f, 180f);
+                    }
+                    c.drawPath(sh, stroke);
                     break;
                 }
                 case MORE:
@@ -813,6 +933,7 @@ public class PlayerActivity extends AppCompatActivity {
         bottom.setPadding(dp(8), dp(4), dp(10), dp(8));
         bottom.setBackgroundColor(0x99000000);
         muteBtn = icoBtn(Ico.VOL, 44, 10, v -> setMuted(!muted));
+        lockBtn = icoBtn(Ico.LOCK, 44, 11, v -> setLocked(true));
         posView = text("0:00", 13);
         durView = text("0:00", 13);
         seek = new SeekBar(this);
@@ -836,6 +957,7 @@ public class PlayerActivity extends AppCompatActivity {
                 scheduleHide();
             }
         });
+        bottom.addView(lockBtn);
         bottom.addView(muteBtn);
         bottom.addView(posView);
         bottom.addView(seek, new LinearLayout.LayoutParams(0, -2, 1f));
@@ -886,7 +1008,37 @@ public class PlayerActivity extends AppCompatActivity {
                 return true;
             }
         });
+        scaleDetector = new ScaleGestureDetector(this, new ScaleGestureDetector.SimpleOnScaleGestureListener() {
+            private float lastFx, lastFy;
+
+            @Override
+            public boolean onScaleBegin(ScaleGestureDetector d) {
+                lastFx = d.getFocusX();
+                lastFy = d.getFocusY();
+                return true;
+            }
+
+            @Override
+            public boolean onScale(ScaleGestureDetector d) {
+                zoom = Math.max(1f, Math.min(5f, zoom * d.getScaleFactor()));
+                panX += d.getFocusX() - lastFx;
+                panY += d.getFocusY() - lastFy;
+                lastFx = d.getFocusX();
+                lastFy = d.getFocusY();
+                applyZoom(true);
+                return true;
+            }
+        });
         touch.setOnTouchListener((v, ev) -> {
+            if (screenLocked) {                         // screen lock: ignore everything, a tap shows the unlock icon
+                if (ev.getActionMasked() == MotionEvent.ACTION_UP) showUnlockHint();
+                return true;
+            }
+            scaleDetector.onTouchEvent(ev);
+            if (scaleDetector.isInProgress() || ev.getPointerCount() > 1) {
+                gestureMode = -1;
+                return true;
+            }
             gd.onTouchEvent(ev);
             int a = ev.getActionMasked();
             if (a == MotionEvent.ACTION_UP || a == MotionEvent.ACTION_CANCEL) {
@@ -896,6 +1048,47 @@ public class PlayerActivity extends AppCompatActivity {
             }
             return true;
         });
+    }
+
+    private void applyZoom(boolean hint) {
+        if (zoom < 1.04f) {
+            zoom = 1f;
+            panX = 0f;
+            panY = 0f;
+        }
+        float maxX = rootView.getWidth() * (zoom - 1f) / 2f;
+        float maxY = rootView.getHeight() * (zoom - 1f) / 2f;
+        panX = Math.max(-maxX, Math.min(maxX, panX));
+        panY = Math.max(-maxY, Math.min(maxY, panY));
+        playerView.setScaleX(zoom);
+        playerView.setScaleY(zoom);
+        playerView.setTranslationX(panX);
+        playerView.setTranslationY(panY);
+        if (hint) {
+            zoomHint.setText("Zoom " + Math.round(zoom * 100) + "%");
+            zoomHint.setVisibility(View.VISIBLE);
+            ui.removeCallbacks(hideZoomHint);
+            ui.postDelayed(hideZoomHint, 800);
+        }
+    }
+
+    private void setLocked(boolean on) {
+        screenLocked = on;
+        if (on) {
+            controls.setVisibility(View.GONE);
+            ui.removeCallbacks(hideRunnable);
+            showUnlockHint();
+            toast("Screen locked");
+        } else {
+            unlockBtn.setVisibility(View.GONE);
+            showControls();
+        }
+    }
+
+    private void showUnlockHint() {
+        unlockBtn.setVisibility(View.VISIBLE);
+        ui.removeCallbacks(hideUnlock);
+        ui.postDelayed(hideUnlock, 2500);
     }
 
     private void seekBy(long delta) {
@@ -1102,6 +1295,7 @@ public class PlayerActivity extends AppCompatActivity {
     }
 
     private void showControls() {
+        if (screenLocked) return;
         controls.setVisibility(View.VISIBLE);
         scheduleHide();
     }
@@ -1239,14 +1433,24 @@ public class PlayerActivity extends AppCompatActivity {
     private void showMore() {
         List<String> labels = new ArrayList<>();
         labels.add("Media info");
+        labels.add("Subtitle style");
+        labels.add("Subtitle delay");
         labels.add("Playback speed");
         labels.add("Decoder (hardware / software)");
+        labels.add("Reset zoom");
         labels.add("Open in another player");
         pickAction("Options", labels, which -> {
             if (which == 0) showInfo();
-            else if (which == 1) showSpeed();
-            else if (which == 2) showDecoder();
-            else openExternal();
+            else if (which == 1) showSubStyle();
+            else if (which == 2) showSubDelay();
+            else if (which == 3) showSpeed();
+            else if (which == 4) showDecoder();
+            else if (which == 5) {
+                zoom = 1f;
+                panX = 0f;
+                panY = 0f;
+                applyZoom(false);
+            } else openExternal();
         });
     }
 
@@ -1452,6 +1656,89 @@ public class PlayerActivity extends AppCompatActivity {
     }
 
     // ====================================================================== subtitles
+    private boolean customSubs() {
+        return extCues != null || subDelayMs != 0;
+    }
+
+    private void applySubStyle() {
+        int sz = prefs.getInt("sub_size", 1), col = prefs.getInt("sub_color", 0);
+        int bg = prefs.getInt("sub_bg", 1), edge = prefs.getInt("sub_edge", 1);
+        int fg = SUB_COLORS[col];
+        int bgc = bg == 0 ? Color.TRANSPARENT : (bg == 1 ? 0x99000000 : 0xFF000000);
+        SubtitleView sv = playerView.getSubtitleView();
+        if (sv != null) {
+            sv.setApplyEmbeddedStyles(false);
+            sv.setApplyEmbeddedFontSizes(false);
+            sv.setFractionalTextSize(SUB_FRACTION[sz]);
+            int et = edge == 0 ? CaptionStyleCompat.EDGE_TYPE_NONE
+                    : (edge == 1 ? CaptionStyleCompat.EDGE_TYPE_OUTLINE : CaptionStyleCompat.EDGE_TYPE_DROP_SHADOW);
+            sv.setStyle(new CaptionStyleCompat(fg, bgc, Color.TRANSPARENT, et, Color.BLACK, Typeface.DEFAULT_BOLD));
+        }
+        subText.setTextSize(TypedValue.COMPLEX_UNIT_SP, SUB_SP[sz]);
+        subText.setTextColor(fg);
+        subText.setBackgroundColor(bgc);
+        subText.setTypeface(Typeface.DEFAULT_BOLD);
+        if (edge == 0) subText.setShadowLayer(0f, 0f, 0f, 0);
+        else if (edge == 1) subText.setShadowLayer(5f, 0f, 0f, Color.BLACK);
+        else subText.setShadowLayer(4f, 2f, 2f, Color.BLACK);
+    }
+
+    /** Uses our own subtitle text view when a subtitle file is loaded or a delay is set; otherwise the player's view. */
+    private void applySubMode() {
+        SubtitleView sv = playerView.getSubtitleView();
+        if (sv != null) sv.setVisibility(customSubs() ? View.GONE : View.VISIBLE);
+        if (!customSubs()) showSubText("");
+    }
+
+    private void showSubText(CharSequence t) {
+        if (t == null || t.length() == 0) {
+            subText.setVisibility(View.GONE);
+            lastShownSub = "";
+        } else {
+            subText.setText(t);
+            subText.setVisibility(View.VISIBLE);
+        }
+    }
+
+    private void scheduleEmbedded(List<Cue> cues) {
+        StringBuilder sb = new StringBuilder();
+        for (Cue c : cues) {
+            if (c.text != null && c.text.length() > 0) {
+                if (sb.length() > 0) sb.append('\n');
+                sb.append(c.text);
+            }
+        }
+        final String t = sb.toString();
+        ui.postAtTime(() -> showSubText(t), embeddedToken, SystemClock.uptimeMillis() + subDelayMs);
+    }
+
+    private void updateExternalSubtitle() {
+        if (extCues == null || player == null) return;
+        long t = player.getCurrentPosition() - subDelayMs;
+        StringBuilder sb = null;
+        for (SubCue c : extCues) {
+            if (c.start > t) break;
+            if (t < c.end) {
+                if (sb == null) sb = new StringBuilder(); else sb.append('\n');
+                sb.append(c.text);
+            }
+        }
+        String s = sb == null ? "" : sb.toString();
+        if (!s.equals(lastShownSub)) {
+            lastShownSub = s;
+            showSubText(s);
+        }
+    }
+
+    private void clearExternalSubs() {
+        extCues = null;
+        extBytes = null;
+        extName = "";
+        ui.removeCallbacks(subTicker);
+        applySubMode();
+        showSubText("");
+    }
+
     private void showSubtitles() {
         List<String> labels = new ArrayList<>();
         List<Tracks.Group> groups = new ArrayList<>();
@@ -1459,25 +1746,40 @@ public class PlayerActivity extends AppCompatActivity {
         labels.add("Off");
         groups.add(null);
         idx.add(-1);
-        int checked = 0;
+        int checked = 0, extPos = -1;
         boolean disabled = player.getTrackSelectionParameters().disabledTrackTypes.contains(C.TRACK_TYPE_TEXT);
+        if (extCues != null) {
+            extPos = labels.size();
+            checked = extPos;
+            labels.add("File: " + extName);
+            groups.add(null);
+            idx.add(-2);
+        }
         for (Tracks.Group g : player.getCurrentTracks().getGroups()) {
             if (g.getType() != C.TRACK_TYPE_TEXT) continue;
             for (int i = 0; i < g.length; i++) {
                 if (!g.isTrackSupported(i)) continue;
-                if (!disabled && g.isTrackSelected(i)) checked = labels.size();
+                if (extCues == null && !disabled && g.isTrackSelected(i)) checked = labels.size();
                 labels.add(describe(g.getTrackFormat(i), "Subtitle " + labels.size()));
                 groups.add(g);
                 idx.add(i);
             }
         }
+        final int loadIdx = labels.size();
         labels.add("Load subtitle file\u2026");
-        final int last = labels.size() - 1;
+        final int styleIdx = labels.size();
+        labels.add("Subtitle style\u2026");
+        final int delayIdx = labels.size();
+        labels.add("Subtitle delay\u2026");
+        final int fExt = extPos;
         pickSingle("Subtitles", labels, checked, which -> {
             if (which == 0) {
+                clearExternalSubs();
                 player.setTrackSelectionParameters(player.getTrackSelectionParameters().buildUpon()
                         .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, true).build());
-            } else if (which == last) {
+            } else if (which == fExt && fExt >= 0) {
+                // keep the loaded file
+            } else if (which == loadIdx) {
                 Intent i = new Intent(Intent.ACTION_GET_CONTENT);
                 i.addCategory(Intent.CATEGORY_OPENABLE);
                 i.setType("*/*");
@@ -1486,7 +1788,12 @@ public class PlayerActivity extends AppCompatActivity {
                 } catch (Exception e) {
                     toast("No file picker available");
                 }
+            } else if (which == styleIdx) {
+                ui.post(this::showSubStyle);
+            } else if (which == delayIdx) {
+                ui.post(this::showSubDelay);
             } else {
+                clearExternalSubs();
                 applyOverride(C.TRACK_TYPE_TEXT, groups.get(which), idx.get(which));
             }
         });
@@ -1504,28 +1811,233 @@ public class PlayerActivity extends AppCompatActivity {
                 if (i >= 0) name = c.getString(i);
             }
         } catch (Exception ignored) { }
-        String lower = name.toLowerCase(Locale.ROOT);
-        String mime = MimeTypes.APPLICATION_SUBRIP;
-        if (lower.endsWith(".vtt")) mime = MimeTypes.TEXT_VTT;
-        else if (lower.endsWith(".ass") || lower.endsWith(".ssa")) mime = MimeTypes.TEXT_SSA;
-        else if (lower.endsWith(".ttml") || lower.endsWith(".xml")) mime = MimeTypes.APPLICATION_TTML;
+        try (InputStream is = getContentResolver().openInputStream(u)) {
+            if (is == null) return;
+            ByteArrayOutputStream bos = new ByteArrayOutputStream();
+            byte[] buf = new byte[8192];
+            int n;
+            long total = 0;
+            while ((n = is.read(buf)) > 0) {
+                bos.write(buf, 0, n);
+                total += n;
+                if (total > 6000000) break;
+            }
+            extBytes = bos.toByteArray();
+            extName = name;
+        } catch (Exception e) {
+            toast("Could not read the subtitle file");
+            return;
+        }
+        loadExternalSubs(true);
+    }
 
-        MediaItem.SubtitleConfiguration sc = new MediaItem.SubtitleConfiguration.Builder(u)
-                .setMimeType(mime)
-                .setLanguage("und")
-                .setLabel(name)
-                .setSelectionFlags(C.SELECTION_FLAG_DEFAULT)
-                .build();
-        int index = player.getCurrentMediaItemIndex();
-        long pos = player.getCurrentPosition();
-        MediaItem n = player.getCurrentMediaItem().buildUpon()
-                .setSubtitleConfigurations(Collections.singletonList(sc)).build();
+    private void loadExternalSubs(boolean announce) {
+        if (extBytes == null || player == null) return;
+        String txt = decodeSubs(extBytes, prefs.getInt("sub_enc", 0));
+        String lower = extName.toLowerCase(Locale.ROOT);
+        List<SubCue> cues = (lower.endsWith(".ass") || lower.endsWith(".ssa")) ? parseAss(txt) : parseSrtVtt(txt);
+        if (cues.isEmpty()) {
+            toast("No subtitles found in this file. Check the file encoding in Subtitle style.");
+            return;
+        }
+        Collections.sort(cues, (a, b) -> Long.compare(a.start, b.start));
+        extCues = cues;
         player.setTrackSelectionParameters(player.getTrackSelectionParameters().buildUpon()
-                .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, false).build());
-        player.replaceMediaItem(index, n);
-        player.seekTo(index, pos);
-        player.play();
-        toast("Subtitle loaded: " + name);
+                .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, true).build());   // do not show the embedded track as well
+        applySubMode();
+        ui.removeCallbacks(subTicker);
+        ui.post(subTicker);
+        if (announce) toast("Subtitle loaded: " + extName + " (" + cues.size() + " lines)");
+    }
+
+    private static String decodeSubs(byte[] b, int enc) {
+        if (b.length >= 3 && (b[0] & 0xFF) == 0xEF && (b[1] & 0xFF) == 0xBB && (b[2] & 0xFF) == 0xBF)
+            return new String(b, 3, b.length - 3, StandardCharsets.UTF_8);
+        if (b.length >= 2 && (b[0] & 0xFF) == 0xFF && (b[1] & 0xFF) == 0xFE)
+            return new String(b, 2, b.length - 2, StandardCharsets.UTF_16LE);
+        if (b.length >= 2 && (b[0] & 0xFF) == 0xFE && (b[1] & 0xFF) == 0xFF)
+            return new String(b, 2, b.length - 2, StandardCharsets.UTF_16BE);
+        try {
+            switch (enc) {
+                case 1: return new String(b, StandardCharsets.UTF_8);
+                case 2: return new String(b, Charset.forName("windows-1256"));
+                case 3: return new String(b, Charset.forName("windows-1252"));
+                case 4: return new String(b, Charset.forName("windows-1251"));
+                default: break;
+            }
+            return StandardCharsets.UTF_8.newDecoder()
+                    .onMalformedInput(CodingErrorAction.REPORT)
+                    .onUnmappableCharacter(CodingErrorAction.REPORT)
+                    .decode(ByteBuffer.wrap(b)).toString();
+        } catch (CharacterCodingException e) {
+            return new String(b, Charset.forName("windows-1252"));
+        } catch (Exception e) {
+            return new String(b, StandardCharsets.UTF_8);
+        }
+    }
+
+    private static final Pattern TIME_RE = Pattern.compile("(?:(\\d+):)?(\\d{1,2}):(\\d{2})[.,](\\d{1,3})");
+
+    private static long parseTime(String s) {
+        Matcher m = TIME_RE.matcher(s.trim());
+        if (!m.find()) return -1;
+        long h = m.group(1) == null ? 0 : Long.parseLong(m.group(1));
+        long mi = Long.parseLong(m.group(2)), se = Long.parseLong(m.group(3));
+        String f = m.group(4);
+        long ms = Long.parseLong(f);
+        if (f.length() == 1) ms *= 100; else if (f.length() == 2) ms *= 10;
+        return ((h * 60 + mi) * 60 + se) * 1000 + ms;
+    }
+
+    private static List<SubCue> parseSrtVtt(String text) {
+        List<SubCue> out = new ArrayList<>();
+        String[] blocks = text.replace("\r\n", "\n").replace('\r', '\n').split("\n\\s*\n");
+        for (String b : blocks) {
+            String[] lines = b.split("\n");
+            int ti = -1;
+            for (int i = 0; i < lines.length; i++) {
+                if (lines[i].contains("-->")) {
+                    ti = i;
+                    break;
+                }
+            }
+            if (ti < 0) continue;
+            String[] parts = lines[ti].split("-->");
+            if (parts.length < 2) continue;
+            long st = parseTime(parts[0]), en = parseTime(parts[1]);
+            if (st < 0 || en < 0) continue;
+            StringBuilder sb = new StringBuilder();
+            for (int i = ti + 1; i < lines.length; i++) {
+                if (sb.length() > 0) sb.append('\n');
+                sb.append(lines[i]);
+            }
+            String t = sb.toString().replaceAll("<[^>]+>", "").replaceAll("\\{\\\\[^}]*\\}", "").trim();
+            if (!t.isEmpty()) out.add(new SubCue(st, en, t));
+        }
+        return out;
+    }
+
+    private static List<SubCue> parseAss(String text) {
+        List<SubCue> out = new ArrayList<>();
+        int startI = 1, endI = 2, textI = 9, fields = 10;
+        for (String line : text.replace("\r\n", "\n").replace('\r', '\n').split("\n")) {
+            String l = line.trim();
+            if (l.startsWith("Format:") && l.toLowerCase(Locale.ROOT).contains("text")) {
+                String[] f = l.substring(7).split(",");
+                fields = f.length;
+                for (int i = 0; i < f.length; i++) {
+                    String n = f[i].trim().toLowerCase(Locale.ROOT);
+                    if (n.equals("start")) startI = i;
+                    else if (n.equals("end")) endI = i;
+                    else if (n.equals("text")) textI = i;
+                }
+            } else if (l.startsWith("Dialogue:")) {
+                String[] f = l.substring(9).split(",", fields);
+                if (f.length <= textI) continue;
+                long st = parseTime(f[startI]), en = parseTime(f[endI]);
+                if (st < 0 || en < 0) continue;
+                String t = f[textI].replaceAll("\\{[^}]*\\}", "").replace("\\N", "\n").replace("\\n", "\n").trim();
+                if (!t.isEmpty()) out.add(new SubCue(st, en, t));
+            }
+        }
+        return out;
+    }
+
+    // ---------------------------------------------------------------- subtitle style
+    private void showSubStyle() {
+        final int sz = prefs.getInt("sub_size", 1), col = prefs.getInt("sub_color", 0);
+        final int bg = prefs.getInt("sub_bg", 1), edge = prefs.getInt("sub_edge", 1), enc = prefs.getInt("sub_enc", 0);
+        List<String> labels = new ArrayList<>();
+        labels.add("Size: " + SUB_SIZE_NAMES[sz]);
+        labels.add("Text color: " + SUB_COLOR_NAMES[col]);
+        labels.add("Background: " + SUB_BG_NAMES[bg]);
+        labels.add("Edge: " + SUB_EDGE_NAMES[edge]);
+        labels.add("File encoding: " + SUB_ENC_NAMES[enc]);
+        labels.add("Reset to default");
+        pickAction("Subtitle style (tap to change)", labels, which -> {
+            SharedPreferences.Editor ed = prefs.edit();
+            switch (which) {
+                case 0: ed.putInt("sub_size", (sz + 1) % 4); break;
+                case 1: ed.putInt("sub_color", (col + 1) % 4); break;
+                case 2: ed.putInt("sub_bg", (bg + 1) % 3); break;
+                case 3: ed.putInt("sub_edge", (edge + 1) % 3); break;
+                case 4: ed.putInt("sub_enc", (enc + 1) % 5); break;
+                default:
+                    ed.remove("sub_size").remove("sub_color").remove("sub_bg").remove("sub_edge").remove("sub_enc");
+                    break;
+            }
+            ed.apply();
+            applySubStyle();
+            if (which == 4 && extBytes != null) loadExternalSubs(false);
+            if (!customSubs() && subText.getVisibility() != View.VISIBLE) {   // short preview
+                subText.setText("Subtitle preview");
+                subText.setVisibility(View.VISIBLE);
+                ui.postDelayed(() -> {
+                    if (!customSubs()) showSubText("");
+                }, 2500);
+            }
+            ui.post(this::showSubStyle);        // re-open so the new value is visible
+        });
+    }
+
+    // ---------------------------------------------------------------- subtitle delay
+    private void changeDelay(long delta) {
+        long d = subDelayMs + delta;
+        if (d < 0 && extCues == null) {
+            d = 0;
+            toast("Earlier subtitles work only for loaded subtitle files");
+        }
+        subDelayMs = Math.max(-30000, Math.min(30000, d));
+        ui.removeCallbacksAndMessages(embeddedToken);
+        applySubMode();
+        lastShownSub = "";
+        updateExternalSubtitle();
+    }
+
+    private void showSubDelay() {
+        LinearLayout root = new LinearLayout(this);
+        root.setOrientation(LinearLayout.VERTICAL);
+        root.setGravity(Gravity.CENTER_HORIZONTAL);
+        root.setPadding(dp(16), dp(8), dp(16), dp(8));
+        final TextView val = text("", 26);
+        val.setPadding(0, dp(8), 0, dp(10));
+        TextView hint = text("Positive: subtitles appear later.\nNegative: earlier (loaded subtitle files only).", 12);
+        hint.setTextColor(0xFFB0B8CC);
+        final Runnable refresh = () -> val.setText(String.format(Locale.US, "%+.1f s", subDelayMs / 1000.0));
+        refresh.run();
+        LinearLayout row = new LinearLayout(this);
+        row.setGravity(Gravity.CENTER);
+        row.setPadding(0, dp(10), 0, dp(6));
+        long[] steps = {-500, -100, 100, 500};
+        String[] names = {"-0.5", "-0.1", "+0.1", "+0.5"};
+        for (int i = 0; i < steps.length; i++) {
+            final long st = steps[i];
+            row.addView(chip(names[i], v -> {
+                changeDelay(st);
+                refresh.run();
+            }));
+        }
+        LinearLayout row2 = new LinearLayout(this);
+        row2.setGravity(Gravity.CENTER);
+        row2.addView(chip("Reset", v -> {
+            subDelayMs = 0;
+            changeDelay(0);
+            refresh.run();
+        }));
+        root.addView(val);
+        root.addView(row);
+        root.addView(row2);
+        root.addView(hint);
+        ui.removeCallbacks(hideRunnable);
+        new AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
+                .setTitle("Subtitle delay")
+                .setView(root)
+                .setPositiveButton("Close", null)
+                .setOnDismissListener(x -> {
+                    hideSystemUi();
+                    scheduleHide();
+                })
+                .show();
     }
 
     // ====================================================================== quality

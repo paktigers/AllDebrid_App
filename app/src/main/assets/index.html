@@ -29,7 +29,7 @@ textarea,input[type=text],input[type=password],input:not([type]){width:100%;back
 textarea{min-height:130px;resize:vertical}
 textarea:focus,input:focus{border-color:var(--ac)}
 .row{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px;align-items:center}
-.row.scroll{flex-wrap:nowrap;overflow-x:auto;padding-bottom:4px}
+.row.scroll{flex-wrap:wrap}
 .row.scroll::-webkit-scrollbar{display:none}
 .chip{background:var(--chip);border:1px solid var(--bd);color:var(--tx);border-radius:999px;padding:8px 13px;font-size:13px;white-space:nowrap}
 .chip.on{background:linear-gradient(135deg,var(--ac),var(--ac2));border-color:transparent;color:#fff}
@@ -91,6 +91,24 @@ nav button.dot:after{content:"";position:absolute;top:6px;left:calc(50% + 8px);w
 .mbtn{background:var(--chip);border:1px solid var(--bd);color:var(--tx);border-radius:10px;padding:9px 12px;font-size:13px}
 .mbtn.danger{color:var(--bad);border-color:rgba(251,113,133,.45)}
 .item .im{flex:1 1 0}
+button,.chip,.btn,.item,.mbtn{touch-action:manipulation}
+.chip{min-height:38px;display:inline-flex;align-items:center}
+.vchart{display:flex;align-items:flex-end;gap:4px;height:120px;margin:10px 0 4px}
+.vchart .col{flex:1;display:flex;flex-direction:column;justify-content:flex-end;align-items:center;height:100%}
+.vchart i{display:block;width:100%;min-height:2px;border-radius:4px 4px 0 0;background:linear-gradient(180deg,var(--ac2),var(--ac))}
+.vchart span{font-size:10px;color:var(--mut);margin-top:3px}
+.qrow{margin-bottom:12px}.qrow .qh{display:flex;justify-content:space-between;font-size:13px;margin-bottom:2px}
+.bar i.hot{background:linear-gradient(90deg,var(--warn),var(--bad))}
+#lockScreen{position:fixed;inset:0;z-index:200;background:var(--bg);display:none;flex-direction:column;align-items:center;justify-content:center;gap:14px;padding:20px}
+#lockScreen.show{display:flex}
+#lkDots{display:flex;gap:12px;height:18px}
+#lkDots i{width:14px;height:14px;border-radius:50%;border:2px solid var(--mut)}
+#lkDots i.on{background:var(--ac2);border-color:var(--ac2)}
+#lkPad{display:grid;grid-template-columns:repeat(3,76px);gap:12px}
+#lkPad button{height:60px;border-radius:50%;background:var(--chip);border:1px solid var(--bd);color:var(--tx);font-size:22px}
+#lkDev{max-width:320px;width:100%;flex:none}
+@keyframes shake{0%,100%{transform:translateX(0)}25%{transform:translateX(-8px)}75%{transform:translateX(8px)}}
+.shake{animation:shake .3s}
 </style>
 </head>
 <body>
@@ -168,6 +186,7 @@ nav button.dot:after{content:"";position:absolute;top:6px;left:calc(50% + 8px);w
     <button class="menu" data-m="account"><span class="ic">👤</span><div><b>Account / API keys</b><span>Keys, PIN login, account info</span></div></button>
     <button class="menu" data-m="hosts"><span class="ic">🌐</span><div><b>Hosts &amp; Quota</b><span>Supported hosts, search, limits</span></div></button>
     <button class="menu" data-m="server"><span class="ic">🕘</span><div><b>AllDebrid server history</b><span>Your account's own links history</span></div></button>
+    <button class="menu" data-m="usage"><span class="ic">📊</span><div><b>Usage &amp; quota</b><span>Premium days, host quotas, 14-day graph</span></div></button>
     <button class="menu" data-m="settings"><span class="ic">⚙️</span><div><b>Settings</b><span>Parallel downloads, folders</span></div></button>
     <button class="menu" data-m="help"><span class="ic">📘</span><div><b>Help / Guide</b><span>How to use the app</span></div></button>
   </section>
@@ -181,6 +200,7 @@ nav button.dot:after{content:"";position:absolute;top:6px;left:calc(50% + 8px);w
   <button data-t="more"><svg viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg>More</button>
 </nav>
 
+<div id="lockScreen"><img src="logo.png" alt="" style="width:88px;height:88px"><h2 style="margin:0">AllDebrid is locked</h2><div class="mut" id="lkMsg"></div><div id="lkDots"></div><div id="lkPad"></div><button class="btn" id="lkDev">Unlock with phone lock</button></div>
 <div id="sheet"></div>
 <div id="toast"></div>
 <div id="loading"><div class="spin"></div><div id="loadTxt" class="mut">Please wait…</div></div>
@@ -248,6 +268,8 @@ const errText = e => (e && e.code ? '[' + e.code + '] ' + (hint(e.code) || e.mes
 /* ================= settings / keys ================= */
 let cfg = Object.assign({ parallel: 3, folderPerTorrent: true, autoDeleteMagnet: false, theme: 'auto' }, store.get('ad_cfg', {}));
 let keys = store.get('ad_keys', { active: '', keys: {} });
+let locked = false, hiddenAt = 0, skipLockOnce = false, lastTouch = 0, lockCfg = store.get('ad_lock', null), pendingTorrent = null;
+['touchstart', 'pointerdown', 'mousedown'].forEach(ev => document.addEventListener(ev, () => { lastTouch = Date.now(); }, { passive: true, capture: true }));
 /* ---- theme ---- */
 const sysDark = () => { try { if (window.Android && Android.isSystemDark) return !!Android.isSystemDark(); } catch (e) {} return !!(window.matchMedia && matchMedia('(prefers-color-scheme: dark)').matches); };
 const isDark = () => cfg.theme === 'dark' || (cfg.theme !== 'light' && sysDark());
@@ -351,6 +373,7 @@ function openOverlay(title, html) {
 }
 function closeOverlay(el) { const i = ovStack.indexOf(el); if (i >= 0) ovStack.splice(i, 1); el.classList.remove('show'); setTimeout(() => el.remove(), 220); }
 window.__back = () => {
+  if (locked) return false;
   if ($('#sheet').classList.contains('show')) { cancelSheet(); return true; }
   if (ovStack.length) { closeOverlay(ovStack[ovStack.length - 1]); return true; }
   if (curTab !== 'gen') { go('gen'); return true; }
@@ -605,7 +628,7 @@ function SmartList(box, opts) {
       const k = keyOf(r), open = !st.selMode && st.exp === k, on = st.selMode && st.sel.has(k);
       const menu = open ? '<div class="imenu">' + opts.menu(r).map((m, j) => `<button class="mbtn ${m.cls || ''}" data-m="${j}">${m.label}</button>`).join('') + '</div>' : '';
       return `<div class="item ${open ? 'open' : ''} ${on ? 'on' : ''}" data-k="${esc(k)}">${st.selMode ? '<span class="ck"></span>' : ''}<div class="im">${opts.render(r, i)}${menu}</div></div>`;
-    }).join('') || `<div class="empty">${esc(opts.empty || 'Nothing found')}</div>`;
+    }).join('') || `<div class="empty">${esc((typeof opts.empty === 'function' ? opts.empty() : opts.empty) || 'Nothing found')}</div>`;
   }
   box.onclick = e => {
     const it = e.target.closest('.item'); if (!it) return;
@@ -617,7 +640,7 @@ function SmartList(box, opts) {
   };
   return {
     st,
-    setRows(rows) { st.rows = rows; if (st.exp !== null && !rows.some(r => keyOf(r) === st.exp)) st.exp = null; const keep = new Set(rows.map(keyOf)); [...st.sel].forEach(k => { if (!keep.has(k)) st.sel.delete(k); }); draw(); },
+    setRows(rows) { const sig = JSON.stringify(rows); if (sig === st.sig && st.drawn) return; st.sig = sig; st.drawn = true; st.rows = rows; if (st.exp !== null && !rows.some(r => keyOf(r) === st.exp)) st.exp = null; const keep = new Set(rows.map(keyOf)); [...st.sel].forEach(k => { if (!keep.has(k)) st.sel.delete(k); }); draw(); },
     setSelectMode(b) { st.selMode = b; st.sel.clear(); st.exp = null; draw(); },
     selectAll() { st.rows.forEach(r => st.sel.add(keyOf(r))); draw(); },
     selected() { return st.rows.filter(r => st.sel.has(keyOf(r))); },
@@ -652,7 +675,7 @@ async function streamItems(list, start) {
       out.push({ title: f.filename, url: f.link, size: f.size || 0, id: String(f.gid || ''), streams: (f.streams || []).map(s => ({ id: s.id, quality: s.quality, ext: s.ext, size: s.filesize || 0 })), source: f.source || '' });
     }
     loaded();
-    if (window.Android && Android.play) Android.play(JSON.stringify(out), start || 0, getKey());
+    if (window.Android && Android.play) { skipLockOnce = true; Android.play(JSON.stringify(out), start || 0, getKey()); }
     else window.open(out[start || 0].url, '_blank');
   } catch (e) { loaded(); toast(errText(e), true); }
 }
@@ -891,20 +914,27 @@ const tMenu = m => tReady(m)
     { label: '↺ Restart', run: () => torRestart([m]) },
     { label: '🗑 Delete', cls: 'danger', run: () => torDelete([m]) }
   ];
-const tList = SmartList($('#tList'), { key: m => m.id, render: tRender, menu: tMenu, onSelect: () => { $('#tHint').textContent = tList.st.sel.size + ' selected'; }, empty: 'No torrents' });
+const tEmpty = () => ({ '': 'No torrents on your AllDebrid account', ready: 'No ready torrents', active: 'No active (downloading) torrents', error: 'No torrents with errors' }[tFilter] || 'No torrents');
+const tList = SmartList($('#tList'), { key: m => m.id, render: tRender, menu: tMenu, onSelect: () => { $('#tHint').textContent = tList.st.sel.size + ' selected'; }, empty: tEmpty });
+let tReq = 0;
 async function loadTorrents(silent) {
-  const box = $('#tList');
+  const box = $('#tList'), my = ++tReq, started = Date.now();
   if (!getKey()) { box.innerHTML = '<div class="empty">First add an API key in More → Account</div>'; return; }
   if (!silent) { if (!tList.st.rows.length) box.innerHTML = '<div class="empty">Loading…</div>'; else box.style.opacity = '.55'; }
   try {
     const d = await ad('magnet/status', tFilter ? { status: tFilter } : {}, { ver: 'v4.1' });
+    if (my !== tReq) return;                      // a newer request (another filter tap) replaced this one
+    if (silent && lastTouch > started) return;    // the user touched the screen meanwhile: do not redraw under the finger
     let rows = d.magnets;
     rows = Array.isArray(rows) ? rows : (rows && typeof rows === 'object' ? (rows.id !== undefined ? [rows] : Object.values(rows)) : []);
     rows = rows.filter(Boolean).sort((a, b) => (b.uploadDate || 0) - (a.uploadDate || 0));
+    tList.st.drawn = false;                       // always redraw after a normal (non-silent) load, e.g. after an error message
+    if (silent) tList.st.drawn = !!tList.st.rows.length;
     tList.setRows(rows);
   } catch (e) {
-    if (!silent) { box.innerHTML = '<div class="empty">' + esc(errText(e)) + '<br><br><button class="chip" id="tRetry">Retry</button></div>'; const r = $('#tRetry'); if (r) r.onclick = () => loadTorrents(); }
-  } finally { box.style.opacity = ''; }
+    if (my !== tReq) return;
+    if (!silent) { box.innerHTML = '<div class="empty">' + esc(errText(e)) + '<br><br><button class="chip" id="tRetry">Retry</button></div>'; tList.st.drawn = false; const r = $('#tRetry'); if (r) r.onclick = () => loadTorrents(); }
+  } finally { if (my === tReq) box.style.opacity = ''; }
 }
 $$('#tFilt [data-f]').forEach(b => b.onclick = () => { tFilter = b.dataset.f; $$('#tFilt [data-f]').forEach(x => x.classList.toggle('on', x === b)); loadTorrents(); });
 $('#tRef').onclick = () => loadTorrents();
@@ -922,7 +952,7 @@ $('#tBulk').onclick = e => {
     if (all.length) { addHistory(all); enqueueDownloads(all); go('dl'); } else toast('No links were created', true);
   });
 };
-setInterval(() => { if (curTab === 'tor' && !ovStack.length && !$('#sheet').classList.contains('show') && !$('#loading').classList.contains('show') && tList.st.rows.some(m => m.statusCode < 4)) loadTorrents(true); }, 5000);
+setInterval(() => { if (curTab === 'tor' && !locked && Date.now() - lastTouch > 4000 && !ovStack.length && !$('#sheet').classList.contains('show') && !$('#loading').classList.contains('show') && tList.st.rows.some(m => m.statusCode < 4)) loadTorrents(true); }, 5000);
 
 /* ---- background watcher for torrents we stopped waiting for ---- */
 let watch = store.get('ad_watch', []);
@@ -941,7 +971,7 @@ setInterval(async () => {
 }, 10000);
 
 /* ================= More: menu ================= */
-$$('[data-m]').forEach(b => b.onclick = () => ({ account: showAccount, hosts: showHosts, server: showServerHistory, settings: showSettings, help: showHelp })[b.dataset.m]());
+$$('[data-m]').forEach(b => b.onclick = () => ({ account: showAccount, hosts: showHosts, server: showServerHistory, settings: showSettings, help: showHelp, usage: showUsage })[b.dataset.m]());
 
 /* ---- Account ---- */
 function showAccount() {
@@ -1056,12 +1086,14 @@ function showSettings() {
       <div class="card"><h4>Simultaneous downloads</h4><div class="row">${[1, 2, 3, 4, 5].map(n => `<button class="chip ${cfg.parallel === n ? 'on' : ''}" data-p="${n}">${n}</button>`).join('')}</div><div class="mut">The Android Download Manager handles the rest (resume, notifications).</div></div>
       <div class="card"><label class="sw" style="margin:0"><input type="checkbox" id="stF" ${cfg.folderPerTorrent ? 'checked' : ''}> Separate folder for each torrent (with subfolders)</label></div>
       <div class="card"><label class="sw" style="margin:0"><input type="checkbox" id="stD" ${cfg.autoDeleteMagnet ? 'checked' : ''}> Delete the torrent from the server after download</label></div>
+      <div class="card"><h4>App lock</h4><div class="mut">${lockCfg ? (lockCfg.mode === 'device' ? 'ON: phone lock (fingerprint / PIN / pattern)' : 'ON: app PIN') : 'OFF: anyone who opens the phone can open the app'}</div><div class="row" style="margin-top:10px">${lockCfg ? '<button class="chip" id="stLockNow">Lock now</button><button class="chip" id="stLockChg">Change</button><button class="chip" id="stLockOff">Turn off</button>' : '<button class="btn primary" id="stLockOn">Turn on app lock</button>'}</div></div>
+      <div class="card"><label class="sw" style="margin:0"><input type="checkbox" id="stClip" ${cfg.clipDetect !== false ? 'checked' : ''}> Detect links in the clipboard when the app opens</label></div>
       <div class="card"><h4>App updates</h4><div class="mut">${appInfo ? 'Version ' + esc(appInfo.versionName) + ' (build ' + appInfo.versionCode + ')' : 'Version unknown'}</div><div class="row" style="margin-top:10px"><button class="btn" id="stUpd">Check for updates</button></div><label class="sw" style="margin:0"><input type="checkbox" id="stAuto" ${cfg.autoUpdate !== false ? 'checked' : ''}> Check automatically</label></div>
       <div class="card"><div class="mut">Files are saved to:<br><b style="color:var(--tx)">Downloads/AllDebrid/</b></div></div>`;
   };
   draw();
-  ov.onclick = e => { const t = e.target; if (t.id === 'stUpd') { checkUpdate(true); } else if (t.dataset.th) { cfg.theme = t.dataset.th; store.set('ad_cfg', cfg); applyTheme(); draw(); } else if (t.dataset.p) { cfg.parallel = +t.dataset.p; store.set('ad_cfg', cfg); draw(); } };
-  ov.onchange = e => { if (e.target.id === 'stAuto') cfg.autoUpdate = e.target.checked; if (e.target.id === 'stF') cfg.folderPerTorrent = e.target.checked; if (e.target.id === 'stD') cfg.autoDeleteMagnet = e.target.checked; store.set('ad_cfg', cfg); };
+  ov.onclick = e => { const t = e.target; if (t.id === 'stLockOn' || t.id === 'stLockChg') enableLock(draw); else if (t.id === 'stLockOff') disableLock(draw); else if (t.id === 'stLockNow') { closeOverlay(ov); showLock(); } else if (t.id === 'stUpd') { checkUpdate(true); } else if (t.dataset.th) { cfg.theme = t.dataset.th; store.set('ad_cfg', cfg); applyTheme(); draw(); } else if (t.dataset.p) { cfg.parallel = +t.dataset.p; store.set('ad_cfg', cfg); draw(); } };
+  ov.onchange = e => { if (e.target.id === 'stClip') cfg.clipDetect = e.target.checked; if (e.target.id === 'stAuto') cfg.autoUpdate = e.target.checked; if (e.target.id === 'stF') cfg.folderPerTorrent = e.target.checked; if (e.target.id === 'stD') cfg.autoDeleteMagnet = e.target.checked; store.set('ad_cfg', cfg); };
 }
 
 /* ---- Help ---- */
@@ -1069,8 +1101,8 @@ function showHelp() {
   const log = errLog.slice(-10).reverse().map(esc).join('<br>') || 'No errors recorded.';
   openOverlay('Help / Guide', `<div class="card" style="text-align:center"><img src="logo.png" alt="AllDebrid" style="width:96px;height:96px"><h4 style="margin:6px 0 0">AllDebrid Mobile</h4><div class="mut">${appInfo ? 'Version ' + esc(appInfo.versionName) + ' (build ' + appInfo.versionCode + ')' : ''}</div></div>
   <div class="card"><h4>Getting started</h4><div class="mut">1. Go to More → Account and add your API key (alldebrid.com/apikeys), or use PIN login.<br>2. In the Generate tab, paste links or magnets and tap Generate.<br>3. Tap any file or torrent to open its actions: Download, Stream, Copy link, Share and more.</div></div>
-  <div class="card"><h4>Streaming</h4><div class="mut">Tap ▶ Stream on a premium link or a torrent file to play it in the built-in player.<br>• Double-tap the right / left side of the screen: +10 / -10 seconds.<br>• Swipe up or down on the right side: volume. On the left side: brightness.<br>• Top bar: Chromecast, CC (subtitles, or load your own file), Audio track, Quality, and ⋮ Options (media info, speed, decoder, open in another player). Bottom bar: mute, seek bar and Aspect ratio.<br>• The player remembers where you stopped and asks if you want to resume or start over.<br>• Audio (DTS, AC3/E-AC3, TrueHD, FLAC...) and video (H.264, HEVC, VP8, VP9) can be decoded in software, so almost every file plays; on a decoding error the player switches automatically.<br>• Chromecast works best with MP4 (H.264/AAC), WebM and HLS files.</div></div>
-  <div class="card"><h4>Tips</h4><div class="mut">• You can "Share" a link from any app to this app.<br>• Tapping a magnet link in a browser can also open this app.<br>• Check tests whether links are dead or alive without using quota.<br>• Use ☑ Select multiple for bulk actions.<br>• Downloads use Android's Download Manager: you get notifications and it resumes automatically if the connection drops.</div></div>
+  <div class="card"><h4>Streaming</h4><div class="mut">Tap ▶ Stream on a premium link or a torrent file to play it in the built-in player.<br>• Double-tap the right / left side of the screen: +10 / -10 seconds.<br>• Swipe up or down on the right side: volume. On the left side: brightness.<br>• Top bar: Chromecast, CC (subtitles, or load your own file), Audio track, Quality, and ⋮ Options (media info, speed, decoder, open in another player). Bottom bar: mute, seek bar and Aspect ratio.<br>• Pinch with two fingers to zoom the picture. The lock icon (bottom left) locks the screen so touches are ignored; tap the screen and press the unlock icon to unlock.<br>• CC > Subtitle style / Subtitle delay (or ⋮ Options): change size, colour, background, edge and shift the timing; you can load .srt, .vtt and .ass files.<br>• The player remembers where you stopped and asks if you want to resume or start over.<br>• Audio (DTS, AC3/E-AC3, TrueHD, FLAC...) and video (H.264, HEVC, VP8, VP9) can be decoded in software, so almost every file plays; on a decoding error the player switches automatically.<br>• Chromecast works best with MP4 (H.264/AAC), WebM and HLS files.</div></div>
+  <div class="card"><h4>Tips</h4><div class="mut">• You can "Share" a link from any app to this app.<br>• Tapping a magnet link in a browser can also open this app.<br>• Check tests whether links are dead or alive without using quota.<br>• Use ☑ Select multiple for bulk actions.<br>• Copy a link or magnet and open the app: it offers to generate it. .torrent files opened from your file manager or browser go straight into the app.<br>• Settings > App lock protects the app with your phone's lock or an app PIN.<br>• More > Usage & quota shows your premium days, host quotas and a 14-day graph.<br>• Downloads use Android's Download Manager: you get notifications and it resumes automatically if the connection drops.</div></div>
   <div class="card"><h4>Please note</h4><div class="mut">Direct links expire after a while; the app creates a fresh one when you download or play from History. Never share your API key with anyone.</div></div>
   <div class="card"><h4>Error log</h4><div class="mut" style="word-break:break-all">${log}</div></div>`);
 }
@@ -1092,6 +1124,7 @@ async function checkUpdate(manual) {
   } catch (e) { if (manual) toast(errText(e), true); }
 }
 function offerUpdate(rel, code, asset) {
+  if ($('#sheet').classList.contains('show') || locked) { setTimeout(() => offerUpdate(rel, code, asset), 6000); return; }
   const notes = String(rel.body || '').slice(0, 400);
   const b = openSheet(`<h3>Update available</h3><div class="mut" style="margin-bottom:12px">New build ${code} (you have ${appInfo.versionCode}). ${asset.size ? fmtSize(asset.size) : ''}${notes ? '<br><br>' + esc(notes) : ''}</div><div class="row"><button class="btn" id="upSkip">Skip this version</button><button class="btn" id="upLater">Later</button></div><div class="row"><button class="btn primary" id="upGo">⬇ Download &amp; install</button></div>`);
   $('#upLater', b).onclick = cancelSheet;
@@ -1100,8 +1133,161 @@ function offerUpdate(rel, code, asset) {
 }
 if (appInfo && cfg.autoUpdate !== false && Date.now() - store.get('ad_lastcheck', 0) > 6 * 3600 * 1000) setTimeout(() => checkUpdate(false), 4000);
 
+/* ================= sha256 (pure JS, works without secure context) ================= */
+function sha256(str) {
+  const rr = (n, x) => (x >>> n) | (x << (32 - n));
+  const K = [], H = [0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19];
+  let p = 2; for (let n = 0; n < 64; p++) { let ok = true; for (let d = 2; d * d <= p; d++) if (p % d === 0) { ok = false; break; } if (ok) { K[n++] = Math.floor((Math.cbrt(p) % 1) * 4294967296) | 0; } }
+  const bytes = unescape(encodeURIComponent(str)).split('').map(c => c.charCodeAt(0));
+  const bl = bytes.length * 8; bytes.push(0x80); while (bytes.length % 64 !== 56) bytes.push(0);
+  for (let i = 7; i >= 0; i--) bytes.push(i >= 4 ? 0 : (bl >>> (i * 8)) & 255);
+  for (let o = 0; o < bytes.length; o += 64) {
+    const w = []; for (let i = 0; i < 16; i++) w[i] = (bytes[o + i * 4] << 24) | (bytes[o + i * 4 + 1] << 16) | (bytes[o + i * 4 + 2] << 8) | bytes[o + i * 4 + 3];
+    for (let i = 16; i < 64; i++) { const s0 = rr(7, w[i - 15]) ^ rr(18, w[i - 15]) ^ (w[i - 15] >>> 3), s1 = rr(17, w[i - 2]) ^ rr(19, w[i - 2]) ^ (w[i - 2] >>> 10); w[i] = (w[i - 16] + s0 + w[i - 7] + s1) | 0; }
+    let [a, b, c, d, e, f, g, h] = H;
+    for (let i = 0; i < 64; i++) { const t1 = (h + (rr(6, e) ^ rr(11, e) ^ rr(25, e)) + ((e & f) ^ (~e & g)) + K[i] + w[i]) | 0, t2 = ((rr(2, a) ^ rr(13, a) ^ rr(22, a)) + ((a & b) ^ (a & c) ^ (b & c))) | 0; h = g; g = f; f = e; e = (d + t1) | 0; d = c; c = b; b = a; a = (t1 + t2) | 0; }
+    H[0] = (H[0] + a) | 0; H[1] = (H[1] + b) | 0; H[2] = (H[2] + c) | 0; H[3] = (H[3] + d) | 0; H[4] = (H[4] + e) | 0; H[5] = (H[5] + f) | 0; H[6] = (H[6] + g) | 0; H[7] = (H[7] + h) | 0;
+  }
+  return H.map(x => ('00000000' + (x >>> 0).toString(16)).slice(-8)).join('');
+}
+
+/* ================= app lock ================= */
+let pinBuf = '', pinAttempts = 0;
+const deviceSecure = () => { try { return !!(window.Android && Android.isDeviceSecure && Android.isDeviceSecure()); } catch (e) { return false; } };
+function setSecure() { try { if (window.Android && Android.setSecure) Android.setSecure(!!lockCfg); } catch (e) {} }
+function drawDots() { const n = Math.max(4, pinBuf.length); $('#lkDots').innerHTML = Array.from({ length: Math.min(8, n) }, (_, i) => `<i class="${i < pinBuf.length ? 'on' : ''}"></i>`).join(''); }
+function showLock() {
+  if (!lockCfg) return;
+  locked = true; pinBuf = ''; closeSheet();
+  const L = $('#lockScreen'); L.classList.add('show');
+  const pin = lockCfg.mode === 'pin';
+  $('#lkMsg').textContent = pin ? 'Enter your PIN' : 'Use your phone lock to continue';
+  $('#lkDots').style.display = pin ? 'flex' : 'none'; $('#lkPad').style.display = pin ? 'grid' : 'none';
+  $('#lkDev').style.display = (!pin || deviceSecure()) ? 'block' : 'none';
+  if (pin) { drawDots(); $('#lkPad').innerHTML = ['1','2','3','4','5','6','7','8','9','⌫','0','OK'].map(k => `<button data-k="${k}">${k}</button>`).join(''); }
+  if (!pin) setTimeout(deviceUnlock, 250);
+}
+function unlockOk() {
+  locked = false; pinAttempts = 0; $('#lockScreen').classList.remove('show');
+  if (pendingTorrent) { const t = pendingTorrent; pendingTorrent = null; window.__incomingTorrent(t.name, t.b64); }
+  setTimeout(checkClipboard, 600);
+}
+function deviceUnlock() { if (window.Android && Android.authenticate) Android.authenticate(); else unlockOk(); }
+window.__authResult = ok => { if (authCb) { const cb = authCb; authCb = null; cb(ok); return; } if (ok) unlockOk(); else $('#lkMsg').textContent = 'Not unlocked. Try again.'; };
+let authCb = null;
+const pinOk = pin => lockCfg && lockCfg.mode === 'pin' && sha256(lockCfg.salt + pin) === lockCfg.hash;
+$('#lkPad').onclick = e => {
+  const b = e.target.closest('[data-k]'); if (!b || !locked || locked === 'wait') return; const k = b.dataset.k;
+  if (k === '⌫') pinBuf = pinBuf.slice(0, -1);
+  else if (k === 'OK') {
+    if (pinOk(pinBuf)) { unlockOk(); return; }
+    pinAttempts++; pinBuf = ''; drawDots(); $('#lkDots').classList.remove('shake'); void $('#lkDots').offsetWidth; $('#lkDots').classList.add('shake');
+    $('#lkMsg').textContent = pinAttempts >= 5 ? 'Too many attempts. Wait 10 seconds.' : 'Wrong PIN'; if (pinAttempts >= 5) { locked = 'wait'; setTimeout(() => { locked = true; pinAttempts = 0; $('#lkMsg').textContent = 'Enter your PIN'; }, 10000); }
+    return;
+  } else if (pinBuf.length < 8) pinBuf += k;
+  drawDots();
+};
+$('#lkDev').onclick = deviceUnlock;
+// ask the user to prove it is them (used before turning the lock off / changing it)
+function verifyUser() {
+  return new Promise(res => {
+    if (!lockCfg) return res(true);
+    if (lockCfg.mode === 'device') { authCb = res; deviceUnlock(); }
+    else ask('Enter your current PIN', { type: 'password', ok: 'Confirm' }).then(v => res(v !== null && pinOk(v)));
+  });
+}
+async function setNewPin() {
+  const a = await ask('Choose a PIN (4 to 8 digits)', { type: 'password', ok: 'Next' }); if (a === null) return null;
+  if (!/^\d{4,8}$/.test(a)) { toast('The PIN must be 4 to 8 digits', true); return null; }
+  const b = await ask('Repeat the PIN', { type: 'password', ok: 'Save' }); if (b === null) return null;
+  if (a !== b) { toast('The PINs do not match', true); return null; }
+  const salt = Math.random().toString(36).slice(2) + Date.now().toString(36);
+  return { mode: 'pin', salt, hash: sha256(salt + a) };
+}
+async function enableLock(done) {
+  if (lockCfg && !(await verifyUser())) { toast('Not confirmed', true); return; }
+  const dev = deviceSecure();
+  const choice = await new Promise(res => {
+    const b = openSheet(`<h3>App lock method</h3><div class="mut" style="margin-bottom:12px">${dev ? 'Phone lock uses your fingerprint, face, PIN or pattern.' : 'Your phone has no screen lock, so only an app PIN is possible.'}</div>${dev ? '<div class="row"><button class="btn primary" id="lkPhone">Use phone lock</button></div>' : ''}<div class="row"><button class="btn" id="lkPin">Use an app PIN</button></div><div class="row"><button class="btn" id="lkNo">Cancel</button></div>`);
+    sheetCancel = () => res(null);
+    if (dev) $('#lkPhone', b).onclick = () => { closeSheet(); res('device'); };
+    $('#lkPin', b).onclick = () => { closeSheet(); res('pin'); };
+    $('#lkNo', b).onclick = cancelSheet;
+  });
+  if (!choice) return;
+  if (choice === 'pin') { const c = await setNewPin(); if (!c) return; lockCfg = c; }
+  else { const ok = await new Promise(r => { authCb = r; deviceUnlock(); }); if (!ok) { toast('Phone lock was not confirmed', true); return; } lockCfg = { mode: 'device' }; }
+  store.set('ad_lock', lockCfg); setSecure(); toast('App lock is on'); if (done) done();
+}
+async function disableLock(done) {
+  if (!(await verifyUser())) { toast('Not confirmed', true); return; }
+  lockCfg = null; store.set('ad_lock', null); setSecure(); toast('App lock is off'); if (done) done();
+}
+window.__bg = () => { hiddenAt = Date.now(); };
+window.__fg = () => {
+  if (lockCfg && !locked && hiddenAt && Date.now() - hiddenAt > 30000 && !skipLockOnce) showLock();
+  skipLockOnce = false; hiddenAt = 0;
+};
+
+/* ================= clipboard detect ================= */
+const clipHash = t => t.length + ':' + t.slice(0, 40) + ':' + t.slice(-40);
+async function checkClipboard() {
+  if (!window.Android || cfg.clipDetect === false || locked) return;
+  if ($('#sheet').classList.contains('show') || $('#loading').classList.contains('show') || ovStack.length) return;
+  let t = ''; try { t = String(Android.paste() || ''); } catch (e) { return; }
+  if (!t || t.length > 200000) return;
+  const sp = splitInput(parseLines(t)), n = sp.links.length + sp.magnets.length;
+  if (!n) return;
+  const h = clipHash(t); if (store.get('ad_lastclip', '') === h) return;
+  store.set('ad_lastclip', h);
+  const first = parseLines(t)[0] || '';
+  const b = openSheet(`<h3>Links found in your clipboard</h3><div class="mut" style="margin-bottom:12px">${sp.links.length} hoster link(s), ${sp.magnets.length} magnet(s).<br><span style="word-break:break-all">${esc(short(first, 80))}</span></div><div class="row"><button class="btn" id="cbNo">Ignore</button><button class="btn" id="cbAdd">Add to the box</button></div><div class="row"><button class="btn primary" id="cbGo">⚡ Generate now</button></div>`);
+  const fill = () => { const i = $('#inp'); i.value = (i.value ? i.value.trimEnd() + '\n' : '') + t.trim(); updateCounts(); go('gen'); };
+  $('#cbNo', b).onclick = cancelSheet;
+  $('#cbAdd', b).onclick = () => { closeSheet(); fill(); };
+  $('#cbGo', b).onclick = () => { closeSheet(); fill(); generate(); };
+}
+window.__focus = () => setTimeout(checkClipboard, 500);
+
+/* ================= .torrent file opened from outside the app ================= */
+window.__incomingTorrent = (name, b64) => {
+  if (locked) { pendingTorrent = { name, b64 }; return; }
+  torrentFiles.push({ name, b64 }); updateCounts(); go('gen');
+  confirmBox('Torrent file received: ' + name, 'Generate now', 'Later').then(y => { if (y) generate(); });
+};
+
+/* ================= usage & quota graphs ================= */
+async function showUsage() {
+  const ov = openOverlay('Usage & quota', '<div class="empty">Loading…</div>');
+  const B = $('.ov-body', ov);
+  try {
+    if (!getKey()) throw new ADError('AUTH_MISSING_APIKEY', 'API key is not set');
+    const u = (await ad('user', {}, { method: 'GET' })).user || {};
+    let hosts = {};
+    try { hosts = (await ad('user/hosts', {}, { ver: 'v4.1', method: 'GET' })).hosts || {}; } catch (e) {}
+    const left = u.premiumUntil ? Math.max(0, Math.ceil((u.premiumUntil * 1000 - Date.now()) / 86400000)) : 0;
+    const premPct = Math.max(2, Math.min(100, left / 30 * 100));
+    let html = `<div class="card"><h4>Premium</h4><div class="qh" style="display:flex;justify-content:space-between"><span>${u.isPremium ? '<b>' + left + ' day(s) left</b>' : 'Not premium'}</span><span class="mut">${fmtEpoch(u.premiumUntil)}</span></div><div class="bar"><i class="${left <= 3 ? 'hot' : ''}" style="width:${premPct}%"></i></div><div class="mut">Fidelity points: ${esc(u.fidelityPoints ?? '-')}</div></div>`;
+    const rows = Object.values(hosts).filter(h => 'quota' in h);
+    html += '<div class="card"><h4>Host quotas (what is left)</h4>' + (rows.length ? rows.map(h => {
+      const tr = h.quotaType === 'traffic', max = +h.quotaMax || 0, leftQ = +h.quota || 0;
+      const used = max > 0 ? Math.max(0, Math.min(100, (max - leftQ) / max * 100)) : 0;
+      const fmt = v => tr ? fmtSize(v * 1048576) : v + ' downloads';
+      return `<div class="qrow"><div class="qh"><b>${esc(h.name)}</b><span class="mut">${fmt(leftQ)} left${max ? ' of ' + fmt(max) : ''}</span></div><div class="bar"><i class="${used > 85 ? 'hot' : ''}" style="width:${used}%"></i></div></div>`;
+    }).join('') : '<div class="mut">No limited hosts on your account.</div>') + '</div>';
+    const days = [];
+    for (let i = 13; i >= 0; i--) { const d = new Date(); d.setHours(0, 0, 0, 0); d.setDate(d.getDate() - i); days.push({ key: d.toDateString(), label: d.getDate(), size: 0, n: 0 }); }
+    hist.forEach(e => { const k = new Date(e.date).toDateString(), d = days.find(x => x.key === k); if (d) { d.size += +e.size || 0; d.n++; } });
+    const max = Math.max(1, ...days.map(d => d.size)), tot = days.reduce((a, d) => a + d.size, 0), cnt = days.reduce((a, d) => a + d.n, 0);
+    html += `<div class="card"><h4>Links generated: last 14 days</h4><div class="mut">${cnt} link(s), ${fmtSize(tot)} in total. AllDebrid does not publish a traffic history, so this graph comes from the links you generated in this app.</div><div class="vchart">${days.map(d => `<div class="col" title="${esc(d.label)}: ${fmtSize(d.size)}"><i style="height:${Math.round(100 * d.size / max)}%"></i><span>${d.label}</span></div>`).join('')}</div></div>`;
+    B.innerHTML = html;
+  } catch (e) { B.innerHTML = '<div class="empty">' + esc(errText(e)) + '</div>'; }
+}
+
 /* ================= init ================= */
 applyTheme(); updateBadge(); updateCounts(); renderDL(); pump();
+if (lockCfg) { showLock(); setSecure(); }
+setTimeout(checkClipboard, 2500);
 if (!getKey()) setTimeout(() => toast('Add an API key to get started (tap 🔑)'), 600);
 </script>
 </body>
