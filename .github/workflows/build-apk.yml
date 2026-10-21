@@ -3,7 +3,15 @@ name: Build APK
 on:
   push:
     branches: [ main, master ]
-  workflow_dispatch:
+    # Do not build (and do not publish a Release) when ONLY documentation changed.
+    # If a commit also changes any other file (code, workflow, resources), the build runs as usual.
+    paths-ignore:
+      - 'docs/**'
+      - '**.md'
+      - '**/*.md'
+      - 'LICENSE'
+      - '.gitignore'
+  workflow_dispatch:      # you can still start a build by hand: Actions > Build APK > Run workflow
 
 permissions:
   contents: write
