@@ -916,27 +916,38 @@ const tMenu = m => tReady(m)
   ];
 const tEmpty = () => ({ '': 'No torrents on your AllDebrid account', ready: 'No ready torrents', active: 'No active (downloading) torrents', error: 'No torrents with errors' }[tFilter] || 'No torrents');
 const tList = SmartList($('#tList'), { key: m => m.id, render: tRender, menu: tMenu, onSelect: () => { $('#tHint').textContent = tList.st.sel.size + ' selected'; }, empty: tEmpty });
-let tReq = 0;
+let tAll = [], tLoaded = false, tReq = 0;
+const tClass = m => (m.statusCode === 4 ? 'ready' : (m.statusCode >= 5 ? 'error' : 'active'));
+// Filters work on the phone: we always load the full list once and split it by status code, so the chips
+// answer instantly and never depend on the server understanding a filter.
+function renderTorrents(force) {
+  const rows = tFilter ? tAll.filter(m => tClass(m) === tFilter) : tAll;
+  const c = { '': tAll.length, ready: 0, active: 0, error: 0 };
+  tAll.forEach(m => { c[tClass(m)]++; });
+  const names = { '': 'All', ready: 'Ready', active: 'Active', error: 'Error' };
+  $$('#tFilt [data-f]').forEach(b => { const f = b.dataset.f; b.classList.toggle('on', f === tFilter); b.textContent = names[f] + (tLoaded ? ' ' + c[f] : ''); });
+  if (force) tList.st.drawn = false;
+  tList.setRows(rows);
+}
 async function loadTorrents(silent) {
   const box = $('#tList'), my = ++tReq, started = Date.now();
   if (!getKey()) { box.innerHTML = '<div class="empty">First add an API key in More → Account</div>'; return; }
-  if (!silent) { if (!tList.st.rows.length) box.innerHTML = '<div class="empty">Loading…</div>'; else box.style.opacity = '.55'; }
+  if (!silent) { if (!tLoaded) box.innerHTML = '<div class="empty">Loading…</div>'; else box.style.opacity = '.55'; }
   try {
-    const d = await ad('magnet/status', tFilter ? { status: tFilter } : {}, { ver: 'v4.1' });
-    if (my !== tReq) return;                      // a newer request (another filter tap) replaced this one
-    if (silent && lastTouch > started) return;    // the user touched the screen meanwhile: do not redraw under the finger
+    const d = await ad('magnet/status', {}, { ver: 'v4.1' });
+    if (my !== tReq) return;                      // an older answer must not replace a newer one
+    if (silent && lastTouch > started) return;    // the user is touching the screen: do not redraw under the finger
     let rows = d.magnets;
     rows = Array.isArray(rows) ? rows : (rows && typeof rows === 'object' ? (rows.id !== undefined ? [rows] : Object.values(rows)) : []);
-    rows = rows.filter(Boolean).sort((a, b) => (b.uploadDate || 0) - (a.uploadDate || 0));
-    tList.st.drawn = false;                       // always redraw after a normal (non-silent) load, e.g. after an error message
-    if (silent) tList.st.drawn = !!tList.st.rows.length;
-    tList.setRows(rows);
+    tAll = rows.filter(Boolean).sort((a, b) => (b.uploadDate || 0) - (a.uploadDate || 0));
+    tLoaded = true;
+    renderTorrents(!silent);
   } catch (e) {
     if (my !== tReq) return;
     if (!silent) { box.innerHTML = '<div class="empty">' + esc(errText(e)) + '<br><br><button class="chip" id="tRetry">Retry</button></div>'; tList.st.drawn = false; const r = $('#tRetry'); if (r) r.onclick = () => loadTorrents(); }
   } finally { if (my === tReq) box.style.opacity = ''; }
 }
-$$('#tFilt [data-f]').forEach(b => b.onclick = () => { tFilter = b.dataset.f; $$('#tFilt [data-f]').forEach(x => x.classList.toggle('on', x === b)); loadTorrents(); });
+$$('#tFilt [data-f]').forEach(b => b.onclick = () => { tFilter = b.dataset.f; if (tLoaded) renderTorrents(true); else { $$('#tFilt [data-f]').forEach(x => x.classList.toggle('on', x === b)); loadTorrents(); } });
 $('#tRef').onclick = () => loadTorrents();
 $('#tSel').onclick = () => { const on = !tList.st.selMode; tList.setSelectMode(on); $('#tSel').classList.toggle('on', on); $('#tBulk').style.display = on ? 'flex' : 'none'; $('#tHint').textContent = on ? '0 selected (tap torrents to select)' : 'Tap a torrent to see its actions.'; };
 $('#tBulk').onclick = e => {
@@ -952,7 +963,7 @@ $('#tBulk').onclick = e => {
     if (all.length) { addHistory(all); enqueueDownloads(all); go('dl'); } else toast('No links were created', true);
   });
 };
-setInterval(() => { if (curTab === 'tor' && !locked && Date.now() - lastTouch > 4000 && !ovStack.length && !$('#sheet').classList.contains('show') && !$('#loading').classList.contains('show') && tList.st.rows.some(m => m.statusCode < 4)) loadTorrents(true); }, 5000);
+setInterval(() => { if (curTab === 'tor' && !locked && Date.now() - lastTouch > 4000 && !ovStack.length && !$('#sheet').classList.contains('show') && !$('#loading').classList.contains('show') && tAll.some(m => m.statusCode < 4)) loadTorrents(true); }, 5000);
 
 /* ---- background watcher for torrents we stopped waiting for ---- */
 let watch = store.get('ad_watch', []);

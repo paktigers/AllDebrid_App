@@ -33,6 +33,8 @@ repository restarts the version number. This project now fixes both:
    AllDebrid; then tap **Update**. Your keys, history and settings stay.
 
 ## Notes
+- Changing only documentation (files in `docs/`, or any `.md` file such as README.md or UPDATING.md) does NOT start a build and does NOT
+  create a new Release. To build anyway: Actions > Build APK > Run workflow.
 - Back up `GITHUB_SECRETS_PRIVATE.txt`. If the key is lost you can create a new one, but then the next
   install needs one more uninstall.
 - If you ever delete the repository and create a new one, the build number restarts at 100 + 1 and
